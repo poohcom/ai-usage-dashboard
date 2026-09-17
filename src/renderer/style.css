@@ -52,6 +52,11 @@ button.link[hidden] { display: none; }
   display: flex; flex-direction: column; gap: 10px; min-height: 180px;
 }
 .card.disabled { opacity: .45; }
+.card-head { cursor: grab; }
+.card.dragging { opacity: .35; }
+.card.drop-before { box-shadow: -4px 0 0 0 var(--accent); }
+.card.drop-after { box-shadow: 4px 0 0 0 var(--accent); }
+.card.drop-before, .card.drop-after { transition: box-shadow .1s; }
 .card.loading .dot { animation: pulse 1s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .3 } }
 .card-head { display: flex; align-items: center; justify-content: space-between; }

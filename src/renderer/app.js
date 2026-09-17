@@ -14,9 +14,77 @@
   for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
   for (const el of document.querySelectorAll('#interval option')) el.textContent = t('ui.min', { n: el.dataset.min });
 
-  const providers = await window.api.providers();
+  const providersRaw = await window.api.providers();
   const init = await window.api.getState();
   settings = init.settings;
+
+  // 저장된 순서대로 정렬 (목록에 없는 새 provider 는 뒤에 붙임)
+  const savedOrder = Array.isArray(settings.order) ? settings.order : [];
+  const providers = [...providersRaw].sort((a, b) => {
+    const ia = savedOrder.indexOf(a.id), ib = savedOrder.indexOf(b.id);
+    return (ia === -1 ? 1e9 : ia) - (ib === -1 ? 1e9 : ib);
+  });
+
+  // ---- 드래그로 카드 순서 바꾸기 ----
+  let dragId = null;
+  function clearDropMarks() {
+    for (const c of grid.querySelectorAll('.card')) c.classList.remove('drop-before', 'drop-after');
+  }
+  function dropSide(target, e) {
+    // 같은 줄이면 좌/우, 다른 줄이면 위/아래 기준으로 앞/뒤 판정
+    const r = target.getBoundingClientRect();
+    const dragEl = grid.querySelector(`.card[data-id="${dragId}"]`);
+    const sameRow = dragEl && Math.abs(dragEl.getBoundingClientRect().top - r.top) < r.height / 2;
+    if (sameRow) return e.clientX < r.left + r.width / 2 ? 'before' : 'after';
+    return e.clientY < r.top + r.height / 2 ? 'before' : 'after';
+  }
+  async function saveOrder() {
+    const order = [...grid.querySelectorAll('.card')].map((c) => c.dataset.id);
+    settings = await window.api.setSettings({ order });
+  }
+  function attachDrag(el) {
+    el.draggable = true;
+    el.addEventListener('dragstart', (e) => {
+      // 버튼/입력 요소에서 시작한 드래그는 무시 (카드 머리글이나 빈 영역에서만)
+      if (e.target.closest('button, input, select, label, pre')) { e.preventDefault(); return; }
+      dragId = el.dataset.id;
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', dragId); } catch { /* 일부 환경 */ }
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      clearDropMarks();
+      dragId = null;
+    });
+    el.addEventListener('dragover', (e) => {
+      if (!dragId || dragId === el.dataset.id) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      clearDropMarks();
+      el.classList.add(dropSide(el, e) === 'before' ? 'drop-before' : 'drop-after');
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'));
+    el.addEventListener('drop', (e) => {
+      if (!dragId || dragId === el.dataset.id) return;
+      e.preventDefault();
+      const dragEl = grid.querySelector(`.card[data-id="${dragId}"]`);
+      if (!dragEl) return;
+      const side = dropSide(el, e);
+      grid.insertBefore(dragEl, side === 'before' ? el : el.nextSibling);
+      clearDropMarks();
+      saveOrder();
+    });
+  }
+  grid.addEventListener('dragover', (e) => { if (dragId) e.preventDefault(); });
+  grid.addEventListener('drop', (e) => {
+    // 카드 밖(빈 공간)에 놓으면 맨 뒤로
+    if (!dragId || e.target.closest('.card')) return;
+    e.preventDefault();
+    const dragEl = grid.querySelector(`.card[data-id="${dragId}"]`);
+    if (dragEl) { grid.appendChild(dragEl); saveOrder(); }
+    clearDropMarks();
+  });
 
   document.getElementById('interval').value = String(settings.refreshIntervalSec || 300);
   document.getElementById('interval').addEventListener('change', async (e) => {
@@ -63,6 +131,7 @@
     el.querySelector('.name').textContent = meta.name;
     el.querySelector('.dot').style.background = meta.color;
     el.querySelector('.toggle').title = t('ui.toggleTitle');
+    el.querySelector('.card-head').title = t('ui.dragTitle');
     el.querySelector('.refresh').title = t('ui.refreshTitle');
     el.querySelector('.logout').textContent = t('ui.logout');
     el.querySelector('.raw').textContent = t('ui.raw');
@@ -86,6 +155,7 @@
       const box = el.querySelector('.rawbox');
       box.hidden = !box.hidden;
     });
+    attachDrag(el);
     grid.appendChild(el);
     return { el, meta, result: null };
   }

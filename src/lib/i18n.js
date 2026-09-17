@@ -53,6 +53,7 @@ const DICT = {
     'ui.m': '{m}m {s}s',
     'ui.toggleTitle': 'Enable/disable this service',
     'ui.refreshTitle': 'Refresh',
+    'ui.dragTitle': 'Drag to reorder',
     // providers: common
     'p.needsLogin': 'Sign in to {site} is required',
     'p.parseFail': 'Could not parse usage response',
@@ -213,6 +214,7 @@ const DICT = {
     'ui.m': '{m}분 {s}초',
     'ui.toggleTitle': '이 서비스 조회 켜기/끄기',
     'ui.refreshTitle': '새로고침',
+    'ui.dragTitle': '드래그해서 순서 바꾸기',
     'p.needsLogin': '{site} 로그인이 필요합니다',
     'p.parseFail': '사용량 응답을 해석할 수 없음',
     'p.parseFailStatus': '사용량 응답을 해석할 수 없음 ({info})',

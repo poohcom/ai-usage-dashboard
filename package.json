@@ -1,7 +1,7 @@
 {
   "name": "ai-usage-dashboard",
   "productName": "AI Usage Dashboard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Claude / ChatGPT / Cursor / Gemini / Perplexity / Grok 사용량과 리셋 시간을 한 화면에서 보여주는 데스크톱 앱",
   "main": "src/main.js",
   "author": "poohc",

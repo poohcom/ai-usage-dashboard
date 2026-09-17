@@ -8,6 +8,7 @@ const DEFAULTS = {
   enabled: { claude: true, chatgpt: true, cursor: true, gemini: true, perplexity: true, grok: true },
   grokModels: ['grok-4', 'grok-3'],
   language: 'auto', // auto | ko | en
+  order: [], // 카드 표시 순서 (provider id 배열, 비어 있으면 기본 순서)
 };
 
 let cache = null;

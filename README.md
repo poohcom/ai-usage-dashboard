@@ -11,8 +11,8 @@ Claude · ChatGPT/Codex · Cursor · Gemini · Perplexity · Grok 의 **사용�
 
 빌드된 실행파일은 저장소의 [`release/`](release/) 폴더와 [Releases](https://github.com/poohcom/ai-usage-dashboard/releases) 페이지에 있습니다.
 
-- `AI-Usage-Dashboard-0.1.0-win-x64-setup.exe`: 설치형
-- `AI-Usage-Dashboard-0.1.0-win-x64-portable.exe`: 설치 없이 실행
+- `AI-Usage-Dashboard-<버전>-win-x64-setup.exe`: 설치형
+- `AI-Usage-Dashboard-<버전>-win-x64-portable.exe`: 설치 없이 실행
 
 코드 서명이 없어 처음 실행 시 SmartScreen 경고가 뜨면 "추가 정보 → 실행"을 누르면 됩니다.
 
@@ -51,6 +51,7 @@ npm run dist:mac   # macOS: dist/ 아래 dmg + zip (macOS 에서 실행해야 �
 ## 동작
 
 - 기본 5분마다 자동 새로고침 (상단에서 1~30분 선택). 리셋 카운트다운은 1초마다 갱신됩니다.
+- 카드 머리글을 드래그해서 순서를 바꿀 수 있고, 바뀐 순서는 설정에 저장됩니다.
 - 창을 닫아도 트레이(메뉴바) 아이콘으로 남습니다. 트레이 아이콘 툴팁에 요약이 표시되고, 트레이 메뉴의 [종료] 로 완전히 종료합니다.
 - 카드의 [원본] 버튼으로 서비스가 돌려준 원본 JSON 을 볼 수 있습니다. 서비스의 내부 API 가 바뀌어 해석에 실패하면 이 원본으로 `src/providers/*.js` 의 파서를 고치면 됩니다.
 - 설정 파일: Windows `%APPDATA%\ai-usage-dashboard\settings.json`, macOS `~/Library/Application Support/ai-usage-dashboard/settings.json`
