@@ -7,6 +7,15 @@ Claude · ChatGPT/Codex · Cursor · Gemini · Perplexity · Grok 의 **사용�
 ![구성](docs/screenshot.png)
 (목업 데이터로 만든 화면. `npx electron scripts/mock-shot.js docs/screenshot.png ko`)
 
+## 다운로드 (Windows)
+
+빌드된 실행파일은 저장소의 [`release/`](release/) 폴더와 [Releases](https://github.com/poohcom/ai-usage-dashboard/releases) 페이지에 있습니다.
+
+- `AI-Usage-Dashboard-0.1.0-win-x64-setup.exe`: 설치형
+- `AI-Usage-Dashboard-0.1.0-win-x64-portable.exe`: 설치 없이 실행
+
+코드 서명이 없어 처음 실행 시 SmartScreen 경고가 뜨면 "추가 정보 → 실행"을 누르면 됩니다.
+
 ## 실행
 
 ```bash
