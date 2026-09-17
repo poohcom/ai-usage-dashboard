@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>AI Usage Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo"></span>
+      <h1 data-i18n="app.title">AI Usage Dashboard</h1>
+      <span class="sub" id="lastRefresh"></span>
+    </div>
+    <div class="actions">
+      <label class="interval"><span data-i18n="ui.language">Language</span>
+        <select id="language">
+          <option value="auto" data-i18n="ui.lang.auto">System</option>
+          <option value="ko">한국어</option>
+          <option value="en">English</option>
+        </select>
+      </label>
+      <label class="interval"><span data-i18n="ui.autoRefresh">Auto refresh</span>
+        <select id="interval">
+          <option value="60" data-min="1"></option>
+          <option value="180" data-min="3"></option>
+          <option value="300" data-min="5"></option>
+          <option value="600" data-min="10"></option>
+          <option value="1800" data-min="30"></option>
+        </select>
+      </label>
+      <button id="refreshAll" class="primary" data-i18n="ui.refreshAll">Refresh all</button>
+    </div>
+  </header>
+
+  <main class="scroll"><div id="grid" class="grid"></div></main>
+
+  <footer class="foot">
+    <span data-i18n="ui.footer"></span>
+  </footer>
+
+  <template id="cardTpl">
+    <section class="card">
+      <div class="card-head">
+        <div class="title">
+          <span class="dot"></span>
+          <h2 class="name"></h2>
+          <span class="badge plan"></span>
+        </div>
+        <div class="tools">
+          <label class="toggle"><input type="checkbox" class="enabled" /><span></span></label>
+          <button class="icon refresh">⟳</button>
+        </div>
+      </div>
+      <div class="meta">
+        <span class="account"></span>
+        <span class="source"></span>
+      </div>
+      <div class="body"></div>
+      <div class="extra"></div>
+      <div class="card-foot">
+        <span class="fetched"></span>
+        <div class="foot-actions">
+          <button class="link login"></button>
+          <button class="link logout"></button>
+          <button class="link raw"></button>
+        </div>
+      </div>
+      <pre class="rawbox" hidden></pre>
+    </section>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

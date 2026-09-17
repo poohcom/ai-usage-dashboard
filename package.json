@@ -1,0 +1,29 @@
+{
+  "name": "ai-usage-dashboard",
+  "productName": "AI Usage Dashboard",
+  "version": "0.1.0",
+  "description": "Claude / ChatGPT / Cursor / Gemini / Perplexity / Grok 사용량과 리셋 시간을 한 화면에서 보여주는 데스크톱 앱",
+  "main": "src/main.js",
+  "author": "poohc",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.poohc.ai-usage-dashboard",
+    "productName": "AI Usage Dashboard",
+    "files": ["src/**/*", "package.json"],
+    "directories": { "output": "dist" },
+    "win": { "target": ["nsis", "portable"], "signAndEditExecutable": false },
+    "mac": { "target": ["dmg", "zip"], "category": "public.app-category.developer-tools" },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+  }
+}

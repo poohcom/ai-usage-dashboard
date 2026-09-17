@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>AI Usage Dashboard (mock)</title>
+  <link rel="stylesheet" href="../src/renderer/style.css" />
+  <script>
+    // 레이아웃/스크린샷 테스트용 목업. 실제 계정 정보는 들어 있지 않다.
+    const now = Date.now();
+    const H = 3600e3, D = 86400e3;
+    const S = {
+      claude: { ok: true, source: 'claude.ai', account: 'me@example.com', plan: 'CLAUDE_MAX_5X', fetchedAt: now, extra: [],
+        windows: [
+          { key: 'session', label: '5시간 세션', usedPct: 15, resetAt: now + 4 * H },
+          { key: 'weekly', label: '주간 (전체 모델)', usedPct: 26, resetAt: now + 4 * D },
+          { key: 'weekly-fable', label: '주간 Fable', usedPct: 35, resetAt: now + 4 * D },
+          { key: 'bd', kind: 'section', label: '주간 사용량 비중 (용도별)' },
+          { key: 'bd1', kind: 'share', label: 'Claude Code', usedPct: 96, detail: '' },
+          { key: 'bd2', kind: 'share', label: 'Chat', usedPct: 4, detail: '' },
+        ] },
+      chatgpt: { ok: true, source: 'Codex CLI', account: 'me@example.com', plan: 'plus', fetchedAt: now, extra: [{ label: 'Plan', value: 'plus' }],
+        windows: [
+          { key: '5h', label: '5시간', usedPct: 42, resetAt: now + 2 * H },
+          { key: 'weekly', label: '주간', usedPct: 71, resetAt: now + 3 * D },
+        ] },
+      cursor: { ok: true, source: 'cursor.com', account: 'me@example.com', plan: 'PRO', fetchedAt: now, extra: [{ label: 'Plan', value: 'pro' }],
+        windows: [
+          { key: 'auto', label: 'Auto 모델 (포함분)', usedPct: 50.4, resetAt: now + 23 * H, detail: '' },
+          { key: 'api', label: '지정 모델 API (포함분)', usedPct: 100, resetAt: now + 23 * H, detail: '$20.00 / $20.00' },
+          { key: 'grok', label: 'Grok Bot Plan (주간)', usedPct: 3.4, resetAt: now + 5 * D, detail: '' },
+          { key: 'sep', kind: 'section', label: '모델별 사용량 (이번 결제 주기, 비용 비중)' },
+          ...['grok-4.6-high-fast', 'Auto (default)', 'claude-opus-5-thinking', 'composer-2.5', 'gpt-5-high', 'gemini-3.8-flash', 'gpt-5.4-mini']
+            .map((m, i) => ({ key: 'm' + i, kind: 'share', label: m, usedPct: Math.max(0, 56 - i * 9), detail: `$${(150 / (i + 1)).toFixed(2)} · 입력 ${9 - i}M / 출력 ${600 - i * 80}K` })),
+        ] },
+      gemini: { ok: true, source: 'Google', account: 'me@example.com', plan: 'Antigravity', fetchedAt: now, extra: [{ label: 'Tier', value: 'Antigravity' }],
+        windows: [
+          { key: 'g1', label: 'Gemini Models · 주간', usedPct: 12, resetAt: now + 3 * D },
+          { key: 'g2', label: 'Gemini Models · 5시간', usedPct: 0, resetAt: now + 5 * H },
+          { key: 'g3', label: 'Claude and GPT models · 주간', usedPct: 4, resetAt: now + 6 * D },
+          { key: 'g4', label: 'Claude and GPT models · 5시간', usedPct: 0, resetAt: now + 5 * H },
+        ] },
+      perplexity: { ok: true, source: 'perplexity.ai', account: null, fetchedAt: now, extra: [{ label: 'Plan', value: 'pro' }],
+        windows: [
+          { key: 'pro', label: 'Pro 검색', usedPct: 38, resetAt: null, detail: '124 / 200 남음' },
+          { key: 'research', label: 'Research', usedPct: 60, resetAt: null, detail: '8 / 20 남음' },
+          { key: 'labs', label: 'Labs', usedPct: 20, resetAt: null, detail: '20 / 25 남음' },
+        ] },
+      grok: { ok: true, source: 'grok.com', fetchedAt: now, extra: [],
+        windows: [
+          { key: 'k1', label: 'grok-4 (24시간 창)', usedPct: 0, resetAt: null, detail: '7 / 7 남음', note: '롤링 24시간 창' },
+          { key: 'k2', label: 'grok-3 (24시간 창)', usedPct: 16.7, resetAt: null, detail: '25 / 30 남음', note: '롤링 24시간 창' },
+        ] },
+    };
+    const NAMES = { claude: 'Claude', chatgpt: 'ChatGPT / Codex', cursor: 'Cursor', gemini: 'Gemini / Antigravity', perplexity: 'Perplexity', grok: 'Grok' };
+    const COLORS = { claude: '#d97757', chatgpt: '#10a37f', cursor: '#a78bfa', gemini: '#4285f4', perplexity: '#20b8cd', grok: '#e5e7eb' };
+    window.api = {
+      i18n: () => new Promise((resolve) => { window.__setDict = resolve; }), // mock-shot.js 가 사전을 주입
+      providers: async () => Object.keys(S).map((id) => ({ id, name: NAMES[id], color: COLORS[id], loginUrl: 'x', loginHint: '', canLogin: true, loginLabel: null })),
+      getState: async () => ({ settings: { refreshIntervalSec: 300, enabled: {}, language: 'auto' }, state: S }),
+      refreshAll: async () => {}, refreshOne: async () => {}, openLogin: async () => {}, clearLogin: async () => {}, setSettings: async (p) => p, openExternal: async () => {},
+      onUpdate: () => {}, onLoading: () => {}, platform: 'win32',
+    };
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo"></span><h1 data-i18n="app.title">AI Usage Dashboard</h1><span class="sub" id="lastRefresh"></span></div>
+    <div class="actions">
+      <label class="interval"><span data-i18n="ui.language"></span><select id="language"><option value="auto" data-i18n="ui.lang.auto"></option><option value="ko">한국어</option><option value="en">English</option></select></label>
+      <label class="interval"><span data-i18n="ui.autoRefresh"></span><select id="interval"><option value="300" data-min="5"></option></select></label>
+      <button id="refreshAll" class="primary" data-i18n="ui.refreshAll"></button>
+    </div>
+  </header>
+  <main class="scroll"><div id="grid" class="grid"></div></main>
+  <footer class="foot"><span data-i18n="ui.footer"></span></footer>
+  <template id="cardTpl">
+    <section class="card">
+      <div class="card-head"><div class="title"><span class="dot"></span><h2 class="name"></h2><span class="badge plan"></span></div>
+        <div class="tools"><label class="toggle"><input type="checkbox" class="enabled" /><span></span></label><button class="icon refresh">⟳</button></div></div>
+      <div class="meta"><span class="account"></span><span class="source"></span></div>
+      <div class="body"></div><div class="extra"></div>
+      <div class="card-foot"><span class="fetched"></span><div class="foot-actions"><button class="link login"></button><button class="link logout"></button><button class="link raw"></button></div></div>
+      <pre class="rawbox" hidden></pre>
+    </section>
+  </template>
+  <script src="../src/renderer/app.js"></script>
+</body>
+</html>
