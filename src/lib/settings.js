@@ -5,7 +5,12 @@ const { app } = require('electron');
 
 const DEFAULTS = {
   refreshIntervalSec: 300,
-  enabled: { claude: true, chatgpt: true, cursor: true, gemini: true, perplexity: true, grok: true },
+  enabled: {
+    claude: true, chatgpt: true, cursor: true, gemini: true, perplexity: true, grok: true,
+    copilot: true, midjourney: true, deepseek: true, openrouter: true, elevenlabs: true,
+    runway: true, kling: true, veo: true, higgsfield: true, suno: true,
+    luma: true, pika: true, hailuo: true, seedance: true,
+  },
   grokModels: ['grok-4', 'grok-3'],
   language: 'auto', // auto | ko | en
   order: [], // 카드 표시 순서 (provider id 배열, 비어 있으면 기본 순서)

@@ -36,7 +36,18 @@ function isBenignUrl(url) {
     || url.startsWith('devtools:');
 }
 
-function notifyDeepLinkBlocked(w, id, url) {
+/** 앱 딥링크(cursor:// 등)만 true. 상대경로·http·about:blank 는 false */
+function isAppDeepLink(url) {
+  const u = String(url || '').trim();
+  if (!u) return false;
+  if (isBenignUrl(u)) return false;
+  // /path, ./x, ?q, #hash, javascript: void 등은 페이지 내부 동작
+  if (u.startsWith('/') || u.startsWith('.') || u.startsWith('?') || u.startsWith('#') || u.startsWith('javascript:')) return false;
+  return /^[a-z][a-z0-9+.-]*:/i.test(u);
+}
+
+function notifyDeepLinkBlocked(w, id, url, { quiet = false } = {}) {
+  if (quiet) return;
   try {
     dialog.showMessageBox(w && !w.isDestroyed() ? w : undefined, {
       type: 'info',
@@ -49,19 +60,24 @@ function notifyDeepLinkBlocked(w, id, url) {
 
 /**
  * OAuth 팝업은 같은 partition 에서 열고, cursor:// 같은 앱 딥링크는 차단한다.
- * (딥링크를 허용하면 Cursor IDE 등이 떠서 웹 세션 쿠키가 이 앱에 안 남는다)
+ * Google 로그인은 보통 window.open('about:blank') 후 리다이렉트하므로 about:blank 는 허용한다.
  */
-function guardAuthWindow(w, id) {
+function guardAuthWindow(w, id, { quietDeepLink = false } = {}) {
   const partition = partitionOf(id);
+  let warned = false;
   const denyDeepLink = (event, url) => {
-    if (isBenignUrl(url)) return;
+    if (!isAppDeepLink(url)) return;
     event.preventDefault();
-    notifyDeepLinkBlocked(w, id, url);
+    if (!warned) {
+      warned = true;
+      notifyDeepLinkBlocked(w, id, url, { quiet: quietDeepLink });
+    }
   };
 
   const openHandler = ({ url }) => {
-    if (!isHttpUrl(url)) {
-      notifyDeepLinkBlocked(w, id, url);
+    // about:blank / 빈 URL = OAuth 팝업 관례. cursor:// 만 거부.
+    if (isAppDeepLink(url)) {
+      denyDeepLink({ preventDefault() {} }, url);
       return { action: 'deny' };
     }
     return {
@@ -80,16 +96,39 @@ function guardAuthWindow(w, id) {
     };
   };
 
+  // 세션 단위로 앱 딥링크만 취소 (OS 가 Cursor.exe 를 띄우기 전)
+  try {
+    const ses = w.webContents.session;
+    if (!ses.__deepLinkFilter) {
+      ses.__deepLinkFilter = true;
+      ses.webRequest.onBeforeRequest((details, callback) => {
+        const u = details.url || '';
+        if (/^(cursor|vscode|antigravity):/i.test(u)) {
+          callback({ cancel: true });
+          return;
+        }
+        callback({});
+      });
+    }
+  } catch { /* 일부 Electron 버전 */ }
+
   const attach = (contents) => {
     contents.setWindowOpenHandler(openHandler);
     contents.on('will-navigate', denyDeepLink);
     contents.on('will-redirect', denyDeepLink);
     contents.on('will-frame-navigate', (event, url) => denyDeepLink(event, url));
-    // 페이지가 location = 'cursor://…' 로 넘기기 전에 가로채기
+    // cursor:// 만 가로채기 — 상대경로/http 네비게이션은 절대 막지 않음 (Google 로그인 깨짐 방지)
     contents.on('dom-ready', () => {
       contents.executeJavaScript(`(() => {
         try {
-          const block = (u) => typeof u === 'string' && !/^https?:/i.test(u) && !u.startsWith('about:') && !u.startsWith('blob:') && !u.startsWith('data:');
+          const isAppLink = (u) => {
+            if (typeof u !== 'string') return false;
+            const s = u.trim();
+            if (!s) return false;
+            if (/^https?:/i.test(s) || s.startsWith('about:') || s.startsWith('blob:') || s.startsWith('data:')) return false;
+            if (s.startsWith('/') || s.startsWith('.') || s.startsWith('?') || s.startsWith('#') || s.startsWith('javascript:')) return false;
+            return /^[a-z][a-z0-9+.-]*:/i.test(s);
+          };
           const wrap = (obj, key) => {
             try {
               const desc = Object.getOwnPropertyDescriptor(obj, key);
@@ -98,18 +137,20 @@ function guardAuthWindow(w, id) {
                 configurable: true,
                 enumerable: desc.enumerable,
                 get: desc.get,
-                set(v) { if (block(String(v))) return; return desc.set.call(this, v); },
+                set(v) { if (isAppLink(String(v))) return; return desc.set.call(this, v); },
               });
             } catch {}
           };
           wrap(window.Location.prototype, 'href');
           const assign = window.location.assign.bind(window.location);
           const replace = window.location.replace.bind(window.location);
-          window.location.assign = (u) => { if (block(String(u))) return; return assign(u); };
-          window.location.replace = (u) => { if (block(String(u))) return; return replace(u); };
+          window.location.assign = (u) => { if (isAppLink(String(u))) return; return assign(u); };
+          window.location.replace = (u) => { if (isAppLink(String(u))) return; return replace(u); };
           document.addEventListener('click', (e) => {
             const a = e.target && e.target.closest && e.target.closest('a[href]');
-            if (a && block(a.getAttribute('href') || '')) { e.preventDefault(); e.stopPropagation(); }
+            if (!a) return;
+            const href = a.getAttribute('href') || '';
+            if (isAppLink(href)) { e.preventDefault(); e.stopPropagation(); }
           }, true);
         } catch {}
       })()`, true).catch(() => {});
@@ -207,8 +248,9 @@ const PAGE_HELPERS = `
 
 /**
  * 로그인 창. cookieName 이 세션에 생기면 자동으로 닫고 onClosed 호출.
+ * quietDeepLink: cursor:// 차단 시 알림 생략 (PKCE poll 로그인은 승인 직후 딥링크가 흔함)
  */
-function openLogin(id, url, onClosed, name, { cookieName = null, cookieUrl = null } = {}) {
+function openLogin(id, url, onClosed, name, { cookieName = null, cookieUrl = null, quietDeepLink = false } = {}) {
   let w = loginWindows.get(id);
   if (w && !w.isDestroyed()) { w.focus(); return w; }
   const ses = getSession(id);
@@ -218,7 +260,7 @@ function openLogin(id, url, onClosed, name, { cookieName = null, cookieUrl = nul
     webPreferences: { partition: partitionOf(id), sandbox: true, contextIsolation: true, nodeIntegration: false },
   });
   loginWindows.set(id, w);
-  guardAuthWindow(w, id);
+  guardAuthWindow(w, id, { quietDeepLink });
 
   let settled = false;
   const finish = () => {
@@ -280,12 +322,19 @@ async function clearSession(id) {
   await ses.clearCache();
 }
 
+function closeLogin(id) {
+  const w = loginWindows.get(id);
+  if (w && !w.isDestroyed()) w.close();
+}
+
 function destroyAll() {
   for (const w of hidden.values()) if (!w.isDestroyed()) w.destroy();
   hidden.clear();
+  for (const w of loginWindows.values()) if (w && !w.isDestroyed()) w.destroy();
+  loginWindows.clear();
 }
 
 module.exports = {
-  runInSite, openLogin, clearSession, destroyAll, PAGE_HELPERS,
+  runInSite, openLogin, closeLogin, clearSession, destroyAll, PAGE_HELPERS,
   setCookie, getCookie, getSession, destroyHidden,
 };

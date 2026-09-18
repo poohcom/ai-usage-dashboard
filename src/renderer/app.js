@@ -99,6 +99,62 @@
     try { await window.api.refreshAll(); } finally { e.target.disabled = false; }
   });
 
+  // ---- 설정 패널 ----
+  const overlay = document.getElementById('settingsOverlay');
+  const providerToggles = document.getElementById('providerToggles');
+  function isEnabled(id) { return settings.enabled?.[id] !== false; }
+  function applyVisibility() {
+    for (const [id, card] of cards) {
+      card.el.hidden = !isEnabled(id);
+    }
+  }
+  function openSettings() { overlay.hidden = false; }
+  function closeSettings() { overlay.hidden = true; }
+  document.getElementById('openSettings').addEventListener('click', openSettings);
+  document.getElementById('closeSettings').addEventListener('click', closeSettings);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSettings(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !overlay.hidden) closeSettings();
+  });
+
+  function buildProviderToggles() {
+    providerToggles.innerHTML = '';
+    for (const p of providers) {
+      const row = document.createElement('label');
+      row.className = 'provider-toggle';
+      const left = document.createElement('span');
+      left.className = 'left';
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.style.background = p.color;
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = p.name;
+      left.append(dot, name);
+      if (p.beta) {
+        const badge = document.createElement('span');
+        badge.className = 'beta-badge';
+        badge.textContent = t('ui.beta');
+        left.appendChild(badge);
+      }
+      const toggle = document.createElement('span');
+      toggle.className = 'toggle';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.dataset.id = p.id;
+      input.checked = isEnabled(p.id);
+      const knob = document.createElement('span');
+      toggle.append(input, knob);
+      row.append(left, toggle);
+      input.addEventListener('change', async () => {
+        settings = await window.api.setSettings({ enabled: { [p.id]: input.checked } });
+        applyVisibility();
+        if (input.checked) window.api.refreshOne(p.id);
+      });
+      providerToggles.appendChild(row);
+    }
+  }
+
   function fmtDuration(ms) {
     if (ms <= 0) return t('ui.reset');
     const s = Math.floor(ms / 1000);
@@ -130,19 +186,17 @@
     el.dataset.id = meta.id;
     el.querySelector('.name').textContent = meta.name;
     el.querySelector('.dot').style.background = meta.color;
-    el.querySelector('.toggle').title = t('ui.toggleTitle');
+    if (meta.beta) {
+      const badge = document.createElement('span');
+      badge.className = 'beta-badge';
+      badge.textContent = t('ui.beta');
+      el.querySelector('.title').insertBefore(badge, el.querySelector('.badge.plan'));
+    }
     el.querySelector('.card-head').title = t('ui.dragTitle');
     el.querySelector('.refresh').title = t('ui.refreshTitle');
     el.querySelector('.logout').textContent = t('ui.logout');
     el.querySelector('.raw').textContent = t('ui.raw');
-    const enabled = el.querySelector('.enabled');
-    enabled.checked = settings.enabled[meta.id] !== false;
-    el.classList.toggle('disabled', !enabled.checked);
-    enabled.addEventListener('change', async () => {
-      settings = await window.api.setSettings({ enabled: { [meta.id]: enabled.checked } });
-      el.classList.toggle('disabled', !enabled.checked);
-      if (enabled.checked) window.api.refreshOne(meta.id);
-    });
+    el.hidden = !isEnabled(meta.id);
     el.querySelector('.refresh').addEventListener('click', () => window.api.refreshOne(meta.id));
     const login = el.querySelector('.login');
     login.textContent = meta.loginLabel || t('ui.login');
@@ -273,6 +327,8 @@
     cards.set(p.id, card);
     render(card);
   }
+  buildProviderToggles();
+  applyVisibility();
 
   window.api.onLoading(({ id }) => {
     const c = cards.get(id);

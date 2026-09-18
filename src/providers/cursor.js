@@ -1,7 +1,8 @@
 'use strict';
-// Cursor: ① Cursor IDE 로컬 세션 토큰 ② 앱 로그인 파티션 쿠키 ③ (최후) 숨김 창 스크립트
+// Cursor: ① Cursor IDE/agent 로컬 토큰 ② PKCE 로그인(poll) 세션 쿠키 ③ 숨김 창 스크립트
 //   /api/usage-summary · /api/dashboard/get-sand-usage-status · get-aggregated-usage-events
 const creds = require('../lib/creds');
+const cursorAuth = require('../lib/cursorAuth');
 const { request, toMs, clampPct } = require('../lib/http');
 const site = require('../lib/siteSession');
 const { t } = require('../lib/i18n');
@@ -107,7 +108,10 @@ function cookieHeaderValue(raw) {
     return `${sub}%3A%3A${rest.join('::')}`;
   }
   const payload = creds.decodeJwt(raw);
-  if (payload && payload.sub) return `${payload.sub}%3A%3A${raw}`;
+  if (payload && payload.sub) {
+    const uid = cursorAuth.userIdFromJwt(raw) || payload.sub;
+    return `${uid}%3A%3A${raw}`;
+  }
   return raw;
 }
 
@@ -201,14 +205,43 @@ async function viaWeb() {
   return result;
 }
 
+/**
+ * PKCE loginDeepControl — Cursor 데스크톱 앱으로 넘기지 않고 poll 로 토큰 수령.
+ */
+async function loginPkce() {
+  const { verifier, uuid, loginUrl } = cursorAuth.generateAuthParams();
+  const ac = new AbortController();
+  site.openLogin('cursor', loginUrl, () => {
+    try { ac.abort(); } catch { /* */ }
+  }, t('cursor.name'), { quietDeepLink: true });
+
+  try {
+    const { accessToken } = await cursorAuth.pollAuth(uuid, verifier, ac.signal);
+    const cookie = cursorAuth.cookieFromAccessToken(accessToken);
+    if (!cookie) throw new Error(t('cursor.loginNoToken'));
+    await site.setCookie('cursor', { url: ORIGIN, name: COOKIE, value: cookie });
+    site.closeLogin('cursor');
+    return true;
+  } catch (e) {
+    if (e && (e.cancelled || ac.signal.aborted)) {
+      throw new Error(t('cursor.loginCancelled'));
+    }
+    throw e;
+  }
+}
+
 module.exports = {
   id: 'cursor',
   nameKey: 'cursor.name',
   color: '#a78bfa',
-  loginUrl: 'https://cursor.com/dashboard',
+  // login() 이 있으면 main 이 이걸 씀 (대시보드 URL → IDE 딥링크 경로 회피)
+  loginUrl: 'https://cursor.com/loginDeepControl',
   hintKey: 'cursor.hint',
   loginCookieName: COOKIE,
   loginCookieUrl: ORIGIN,
+  async login() {
+    return loginPkce();
+  },
   async fetch() {
     const notes = [];
     for (const step of [

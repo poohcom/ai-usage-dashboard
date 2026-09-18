@@ -184,62 +184,6 @@ function cursorStateDbPaths() {
   return paths;
 }
 
-/**
- * Cursor IDE 가 저장한 세션 JWT (state.vscdb 의 cursorAuth/accessToken).
- * 웹 쿠키 WorkosCursorSessionToken = `${sub}::${jwt}` 형태로 쓴다.
- */
-function cursorIdeToken() {
-  if (process.env.CURSOR_SESSION_TOKEN) {
-    const raw = process.env.CURSOR_SESSION_TOKEN.trim();
-    if (raw.includes('::') || raw.includes('%3A%3A')) {
-      const cookie = raw.includes('%3A%3A') ? decodeURIComponent(raw) : raw;
-      const jwt = cookie.split('::').pop();
-      const payload = decodeJwt(jwt);
-      return { jwt, sub: (payload && payload.sub) || cookie.split('::')[0], cookie, sourceKey: 'cursor.srcEnv' };
-    }
-    const payload = decodeJwt(raw);
-    if (payload && payload.sub) {
-      return { jwt: raw, sub: payload.sub, cookie: `${payload.sub}::${raw}`, sourceKey: 'cursor.srcEnv' };
-    }
-  }
-  const keyHints = ['cursorAuth/accessToken', 'cursorAuth/cachedAccessToken', 'WorkosCursorSessionToken'];
-  for (const db of cursorStateDbPaths()) {
-    // Cursor IDE 가 DB 를 잠그면 복사본으로 읽는다
-    let target = db;
-    let tmp = null;
-    try {
-      if (fs.existsSync(db)) {
-        tmp = path.join(os.tmpdir(), `cursor-state-${process.pid}-${Date.now()}.vscdb`);
-        fs.copyFileSync(db, tmp);
-        target = tmp;
-      }
-    } catch { target = db; tmp = null; }
-    try {
-      for (const hint of keyHints) {
-        const jwt = scanVscdbJwt(target, hint);
-        if (!jwt) continue;
-        const payload = decodeJwt(jwt);
-        if (!payload || !payload.sub) continue;
-        return { jwt, sub: payload.sub, cookie: `${payload.sub}::${jwt}`, sourceKey: 'cursor.srcIde' };
-      }
-    } finally {
-      if (tmp) try { fs.unlinkSync(tmp); } catch { /* */ }
-    }
-  }
-  if (process.platform === 'darwin') {
-    try {
-      const jwt = execFileSync('security', ['find-generic-password', '-s', 'cursor-access-token', '-w'], {
-        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000,
-      }).trim();
-      const payload = decodeJwt(jwt);
-      if (jwt && payload && payload.sub) {
-        return { jwt, sub: payload.sub, cookie: `${payload.sub}::${jwt}`, sourceKey: 'cursor.srcKeychain' };
-      }
-    } catch { /* 없음 */ }
-  }
-  return null;
-}
-
 function normalizeGoogleTokens(j) {
   if (!j || typeof j !== 'object') return null;
   const access = j.access_token || j.accessToken;
@@ -324,6 +268,94 @@ function decodeJwt(token) {
     const part = token.split('.')[1];
     return JSON.parse(Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
   } catch { return null; }
+}
+
+/** WorkOS JWT sub → 쿠키용 user id (google-oauth2|user_… → user_…) */
+function cursorUserIdFromSub(sub) {
+  if (sub == null) return null;
+  const s = String(sub);
+  const pipe = s.lastIndexOf('|');
+  if (pipe >= 0 && s.slice(pipe + 1)) return s.slice(pipe + 1);
+  return s;
+}
+
+function cursorAuthJsonPaths() {
+  const paths = [];
+  if (process.platform === 'win32') {
+    paths.push(path.join(process.env.USERPROFILE || home(), '.cursor', 'auth.json'));
+    paths.push(path.join(process.env.APPDATA || path.join(home(), 'AppData', 'Roaming'), 'Cursor', 'auth.json'));
+  } else if (process.platform === 'darwin') {
+    paths.push(path.join(home(), '.cursor', 'auth.json'));
+    paths.push(path.join(home(), 'Library', 'Application Support', 'Cursor', 'auth.json'));
+  } else {
+    paths.push(path.join(home(), '.cursor', 'auth.json'));
+    paths.push(path.join(home(), '.config', 'cursor', 'auth.json'));
+  }
+  return paths;
+}
+
+function tokenFromAccessJwt(jwt, sourceKey) {
+  const payload = decodeJwt(jwt);
+  if (!jwt || !payload || !payload.sub) return null;
+  const sub = cursorUserIdFromSub(payload.sub);
+  return { jwt, sub, cookie: `${sub}::${jwt}`, sourceKey };
+}
+
+/**
+ * Cursor IDE 가 저장한 세션 JWT (state.vscdb 의 cursorAuth/accessToken).
+ * 웹 쿠키 WorkosCursorSessionToken = `${userId}::${jwt}` 형태로 쓴다.
+ */
+function cursorIdeToken() {
+  if (process.env.CURSOR_SESSION_TOKEN) {
+    const raw = process.env.CURSOR_SESSION_TOKEN.trim();
+    if (raw.includes('::') || raw.includes('%3A%3A')) {
+      const cookie = raw.includes('%3A%3A') ? decodeURIComponent(raw) : raw;
+      const jwt = cookie.split('::').pop();
+      const payload = decodeJwt(jwt);
+      const sub = cursorUserIdFromSub((payload && payload.sub) || cookie.split('::')[0]);
+      return { jwt, sub, cookie: `${sub}::${jwt}`, sourceKey: 'cursor.srcEnv' };
+    }
+    const fromEnv = tokenFromAccessJwt(raw, 'cursor.srcEnv');
+    if (fromEnv) return fromEnv;
+  }
+  for (const p of cursorAuthJsonPaths()) {
+    const j = readJson(p);
+    const jwt = j && (j.accessToken || j.access_token);
+    const fromFile = tokenFromAccessJwt(jwt, 'cursor.srcAgent');
+    if (fromFile) return fromFile;
+  }
+  const keyHints = ['cursorAuth/accessToken', 'cursorAuth/cachedAccessToken', 'WorkosCursorSessionToken'];
+  for (const db of cursorStateDbPaths()) {
+    // Cursor IDE 가 DB 를 잠그면 복사본으로 읽는다
+    let target = db;
+    let tmp = null;
+    try {
+      if (fs.existsSync(db)) {
+        tmp = path.join(os.tmpdir(), `cursor-state-${process.pid}-${Date.now()}.vscdb`);
+        fs.copyFileSync(db, tmp);
+        target = tmp;
+      }
+    } catch { target = db; tmp = null; }
+    try {
+      for (const hint of keyHints) {
+        const jwt = scanVscdbJwt(target, hint);
+        const fromDb = tokenFromAccessJwt(jwt, 'cursor.srcIde');
+        if (fromDb) return fromDb;
+      }
+    } finally {
+      if (tmp) try { fs.unlinkSync(tmp); } catch { /* */ }
+    }
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const jwt = execFileSync('security', ['find-generic-password', '-s', 'cursor-access-token', '-w'], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000,
+      }).trim();
+      const fromKc = tokenFromAccessJwt(jwt, 'cursor.srcKeychain');
+      if (fromKc) return fromKc;
+    } catch { /* 없음 */ }
+  }
+  return null;
 }
 
 module.exports = {
