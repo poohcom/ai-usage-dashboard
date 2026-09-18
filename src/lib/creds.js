@@ -326,16 +326,27 @@ function cursorIdeToken() {
   }
   const keyHints = ['cursorAuth/accessToken', 'cursorAuth/cachedAccessToken', 'WorkosCursorSessionToken'];
   for (const db of cursorStateDbPaths()) {
-    // Cursor IDE 가 DB 를 잠그면 복사본으로 읽는다
+    // Cursor IDE 가 DB 를 잠그면 0700 임시 디렉터리에 복사해 읽는다
     let target = db;
+    let tmpDir = null;
     let tmp = null;
     try {
       if (fs.existsSync(db)) {
-        tmp = path.join(os.tmpdir(), `cursor-state-${process.pid}-${Date.now()}.vscdb`);
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-usage-cursor-'));
+        try { fs.chmodSync(tmpDir, 0o700); } catch { /* Windows */ }
+        tmp = path.join(tmpDir, 'state.vscdb');
         fs.copyFileSync(db, tmp);
+        try { fs.chmodSync(tmp, 0o600); } catch { /* Windows */ }
         target = tmp;
       }
-    } catch { target = db; tmp = null; }
+    } catch {
+      target = db;
+      tmp = null;
+      if (tmpDir) {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ }
+        tmpDir = null;
+      }
+    }
     try {
       for (const hint of keyHints) {
         const jwt = scanVscdbJwt(target, hint);
@@ -343,7 +354,11 @@ function cursorIdeToken() {
         if (fromDb) return fromDb;
       }
     } finally {
-      if (tmp) try { fs.unlinkSync(tmp); } catch { /* */ }
+      if (tmpDir) {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ }
+      } else if (tmp) {
+        try { fs.unlinkSync(tmp); } catch { /* */ }
+      }
     }
   }
   if (process.platform === 'darwin') {

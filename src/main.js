@@ -110,7 +110,10 @@ function createWindow() {
     },
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url || '')) shell.openExternal(url);
+    return { action: 'deny' };
+  });
   mainWindow.on('close', (e) => {
     // 창을 닫아도 트레이에 남겨 두고, 트레이 메뉴의 종료로만 완전히 종료
     if (!quitting) { e.preventDefault(); mainWindow.hide(); }
@@ -182,7 +185,9 @@ ipcMain.handle('settings:set', (_e, patch) => {
   }
   return s;
 });
-ipcMain.handle('open:external', (_e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); });
+ipcMain.handle('open:external', (_e, url) => {
+  if (/^https?:\/\//i.test(url || '')) shell.openExternal(url);
+});
 
 // ---- lifecycle ----
 const gotLock = app.requestSingleInstanceLock();

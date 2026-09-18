@@ -53,19 +53,40 @@ function cancelPendingLogin() {
 
 function storeFile(name) { return path.join(app.getPath('userData'), `${name}.oauth`); }
 
+function requireSafeStorage() {
+  if (!safeStorage.isEncryptionAvailable()) {
+    const err = new Error(t('oauth.noSafeStorage'));
+    err.code = 'NO_SAFE_STORAGE';
+    throw err;
+  }
+}
+
 function saveTokens(name, tokens) {
+  requireSafeStorage();
   const json = JSON.stringify(tokens);
-  const buf = safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(json) : Buffer.from(json, 'utf8');
-  fs.writeFileSync(storeFile(name), buf);
+  const buf = safeStorage.encryptString(json);
+  const file = storeFile(name);
+  fs.writeFileSync(file, buf, { mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch { /* Windows */ }
 }
 
 function loadTokens(name) {
   try {
     const buf = fs.readFileSync(storeFile(name));
-    let json;
-    try { json = safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : buf.toString('utf8'); }
-    catch { json = buf.toString('utf8'); }
-    return JSON.parse(json);
+    // 암호화 불가 환경에서는 디스크 토큰을 쓰지 않음 (fail-closed)
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    try {
+      return JSON.parse(safeStorage.decryptString(buf));
+    } catch {
+      // 레거시 평문 → 한 번만 읽어 암호화 재저장
+      try {
+        const legacy = JSON.parse(buf.toString('utf8'));
+        saveTokens(name, legacy);
+        return legacy;
+      } catch {
+        return null;
+      }
+    }
   } catch { return null; }
 }
 

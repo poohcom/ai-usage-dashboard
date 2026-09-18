@@ -23,6 +23,7 @@ const DICT = {
     'oauth.tokenFail': 'Google token request failed ({status}): {msg}',
     'oauth.timeout': 'Sign-in timed out (5 minutes)',
     'oauth.cancelled': 'Sign-in cancelled',
+    'oauth.noSafeStorage': 'OS secure storage is unavailable — cannot save Google tokens. Sign in again after enabling OS encryption / keychain.',
     'oauth.portInUse': 'Port {port} is in use. Close any other Antigravity/Gemini login, wait a moment, then try again.',
     // renderer
     'ui.notYet': 'not fetched yet',
@@ -270,6 +271,7 @@ const DICT = {
     'oauth.tokenFail': 'Google 토큰 요청 실패 ({status}): {msg}',
     'oauth.timeout': '로그인 시간 초과 (5분)',
     'oauth.cancelled': '로그인이 취소되었습니다',
+    'oauth.noSafeStorage': 'OS 보안 저장소를 사용할 수 없어 Google 토큰을 저장할 수 없습니다. OS 암호화/키체인 사용 가능 여부를 확인한 뒤 다시 로그인하세요.',
     'oauth.portInUse': '포트 {port} 가 사용 중입니다. 다른 Antigravity/Gemini 로그인을 닫고 잠시 후 다시 시도하세요.',
     'ui.notYet': '아직 조회 전',
     'ui.autoRefresh': '자동 새로고침',

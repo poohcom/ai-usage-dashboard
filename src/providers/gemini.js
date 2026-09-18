@@ -6,7 +6,6 @@
 //   OAuth 클라이언트 값은 소스에 없고, 설치된 agy / Antigravity IDE 실행파일에서 런타임에 추출한다.
 const creds = require('../lib/creds');
 const oauth = require('../lib/googleOAuth');
-const settings = require('../lib/settings');
 const { request, toMs, clampPct } = require('../lib/http');
 const { t } = require('../lib/i18n');
 
@@ -41,16 +40,12 @@ async function isPair(id, secret) {
   return !!(res.json && res.json.error === 'invalid_grant');
 }
 
-/** Antigravity OAuth 클라이언트 목록 [{id, secret}] — 로컬 실행파일에서 추출, 짝은 검증 후 설정에 캐시 */
+/** Antigravity OAuth 클라이언트 목록 [{id, secret}] — 로컬 실행파일에서 추출, 메모리만 캐시(디스크 평문 저장 금지) */
 async function antigravityClients() {
   if (clientCache) return clientCache;
   const cand = creds.antigravityOauthCandidates();
   if (!cand.ids.length || !cand.secrets.length) return [];
   if (cand.paired) return (clientCache = [{ id: cand.ids[0], secret: cand.secrets[0] }]);
-  const cached = settings.load().antigravityClients;
-  if (Array.isArray(cached) && cached.length && cached.every((c) => cand.ids.includes(c.id) && cand.secrets.includes(c.secret))) {
-    return (clientCache = cached);
-  }
   const pairs = [];
   for (const id of cand.ids) {
     for (const secret of cand.secrets) {
@@ -58,7 +53,7 @@ async function antigravityClients() {
     }
   }
   if (!pairs.length && cand.ids.length === 1 && cand.secrets.length === 1) pairs.push({ id: cand.ids[0], secret: cand.secrets[0] });
-  if (pairs.length) { settings.save({ antigravityClients: pairs }); clientCache = pairs; }
+  if (pairs.length) clientCache = pairs;
   return pairs;
 }
 
