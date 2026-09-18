@@ -9,15 +9,21 @@ on:
       - master
     paths:
       - '.github/workflows/build-macos.yml'
+      - 'package.json'
+      - 'src/**'
 
 permissions:
   contents: write
 
 jobs:
   build-mac:
-    name: macOS x64 + arm64
+    name: macOS ${{ matrix.arch }}
     runs-on: macos-14
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,17 +31,17 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Build macOS (Intel x64 + Apple Silicon arm64)
+      - name: Build macOS (${{ matrix.arch }})
         env:
-          # 코드 서명 없음 (개인 배포). Gatekeeper 경고는 사용자가 우회 가능.
+          # 코드 서명/공증 없음
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --mac dmg zip --x64 --arm64
+        run: npx electron-builder --mac dmg zip --${{ matrix.arch }} -c.mac.identity=null
 
       - name: List dist outputs
         run: ls -lah dist/
@@ -45,47 +51,69 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
+          ARCH='${{ matrix.arch }}'
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           mkdir -p release-out
-          # electron-builder 산출물 이름을 다운로드용으로 정리
           shopt -s nullglob
           for f in dist/*.dmg dist/*.zip; do
             base=$(basename "$f")
-            lower=$(echo "$base" | tr '[:upper:]' '[:lower:]')
-            arch="unknown"
-            if echo "$lower" | grep -q 'arm64'; then arch="arm64"
-            elif echo "$lower" | grep -q 'x64\|intel\|amd64'; then arch="x64"
-            elif echo "$lower" | grep -q 'universal'; then arch="universal"
-            else
-              # x64 dmg는 종종 arch 접미사 없음
-              if [[ "$base" == *.dmg ]] || [[ "$base" == *.zip ]]; then
-                arch="x64"
-              fi
-            fi
+            # 이 job은 단일 arch만 빌드하므로 matrix arch 사용
+            # (파일명에 arch가 없을 수 있음 — x64)
             ext="${base##*.}"
-            out="AI-Usage-Dashboard-${VERSION}-mac-${arch}.${ext}"
+            out="AI-Usage-Dashboard-${VERSION}-mac-${ARCH}.${ext}"
             cp "$f" "release-out/$out"
-            echo "Prepared $out"
+            echo "Prepared $out from $base"
           done
           ls -lah release-out/
+          test -n "$(ls -A release-out)"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: macos-builds
+          name: macos-${{ matrix.arch }}
           path: release-out/*
           if-no-files-found: error
           retention-days: 14
 
+  publish:
+    name: Publish Release
+    needs: build-mac
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all mac artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macos-*
+          merge-multiple: true
+          path: release-out
+
+      - name: List files
+        run: ls -lah release-out/
+
+      - name: Read version
+        id: ver
+        run: |
+          # artifact 파일명에서 버전 추출
+          f=$(ls release-out/AI-Usage-Dashboard-*-mac-*.dmg | head -n1)
+          ver=$(echo "$f" | sed -E 's/.*AI-Usage-Dashboard-([0-9.]+)-mac-.*/\1/')
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.assets.outputs.version }}
-          name: v${{ steps.assets.outputs.version }}
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
           draft: false
           prerelease: false
           generate_release_notes: true
           files: release-out/*
           fail_on_unmatched_files: true
+          body: |
+            ## macOS
+            - `AI-Usage-Dashboard-*-mac-arm64.dmg` / `.zip` — Apple Silicon
+            - `AI-Usage-Dashboard-*-mac-x64.dmg` / `.zip` — Intel
+
+            코드 서명이 없어 처음 실행 시 Gatekeeper 경고가 나면 **시스템 설정 → 개인 정보 보호 및 보안**에서 허용하거나, 우클릭 → 열기를 사용하세요.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

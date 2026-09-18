@@ -41,7 +41,8 @@
       ],
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": false,
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "identity": null
     },
     "nsis": {
       "oneClick": false,
