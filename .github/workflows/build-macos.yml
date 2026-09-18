@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   build-mac:
@@ -38,13 +39,43 @@ jobs:
         run: npm ci
 
       - name: Build macOS (${{ matrix.arch }})
+        id: build
         env:
-          # 코드 서명/공증 없음
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --mac dmg zip --${{ matrix.arch }} -c.mac.identity=null
+          # 서명/공증 완전 스킵
+          CSC_IDENTITY: '-'
+        run: |
+          set -o pipefail
+          npx electron-builder --mac zip --${{ matrix.arch }} 2>&1 | tee build.log
+          # dmg는 zip 성공 후 추가 시도 (실패해도 zip은 유지)
+          npx electron-builder --mac dmg --${{ matrix.arch }} 2>&1 | tee -a build.log || echo "dmg build failed (zip may still be ok)" >> build.log
+          ls -lah dist/ | tee -a build.log
+          # zip이 하나라도 있어야 성공
+          test -n "$(ls dist/*.zip 2>/dev/null || true)"
 
-      - name: List dist outputs
-        run: ls -lah dist/
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.arch }}
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Post failure log as issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "## macOS ${{ matrix.arch }} build failed"
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo '```'
+            tail -n 120 build.log || echo '(no log)'
+            echo '```'
+          } > /tmp/issue.md
+          gh issue create --title "ci: macOS ${{ matrix.arch }} build failed (#${{ github.run_number }})" --body-file /tmp/issue.md || true
 
       - name: Prepare release assets
         id: assets
@@ -55,14 +86,12 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           mkdir -p release-out
           shopt -s nullglob
-          for f in dist/*.dmg dist/*.zip; do
+          for f in dist/*.zip dist/*.dmg; do
             base=$(basename "$f")
-            # 이 job은 단일 arch만 빌드하므로 matrix arch 사용
-            # (파일명에 arch가 없을 수 있음 — x64)
             ext="${base##*.}"
             out="AI-Usage-Dashboard-${VERSION}-mac-${ARCH}.${ext}"
             cp "$f" "release-out/$out"
-            echo "Prepared $out from $base"
+            echo "Prepared $out"
           done
           ls -lah release-out/
           test -n "$(ls -A release-out)"
@@ -93,9 +122,8 @@ jobs:
       - name: Read version
         id: ver
         run: |
-          # artifact 파일명에서 버전 추출
-          f=$(ls release-out/AI-Usage-Dashboard-*-mac-*.dmg | head -n1)
-          ver=$(echo "$f" | sed -E 's/.*AI-Usage-Dashboard-([0-9.]+)-mac-.*/\1/')
+          f=$(ls release-out/AI-Usage-Dashboard-*-mac-*.* | head -n1)
+          ver=$(basename "$f" | sed -E 's/^AI-Usage-Dashboard-([0-9.]+)-mac-.+$/\1/')
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "tag=v$ver" >> "$GITHUB_OUTPUT"
 
@@ -111,9 +139,9 @@ jobs:
           fail_on_unmatched_files: true
           body: |
             ## macOS
-            - `AI-Usage-Dashboard-*-mac-arm64.dmg` / `.zip` — Apple Silicon
-            - `AI-Usage-Dashboard-*-mac-x64.dmg` / `.zip` — Intel
+            - `AI-Usage-Dashboard-*-mac-arm64.zip` / `.dmg` — Apple Silicon
+            - `AI-Usage-Dashboard-*-mac-x64.zip` / `.dmg` — Intel
 
-            코드 서명이 없어 처음 실행 시 Gatekeeper 경고가 나면 **시스템 설정 → 개인 정보 보호 및 보안**에서 허용하거나, 우클릭 → 열기를 사용하세요.
+            코드 서명이 없어 처음 실행 시 Gatekeeper 경고가 나면 우클릭 → 열기, 또는 **시스템 설정 → 개인 정보 보호 및 보안**에서 허용하세요.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
