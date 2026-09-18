@@ -40,9 +40,10 @@ jobs:
           CSC_IDENTITY: '-'
         run: |
           set -o pipefail
-          npx electron-builder --mac zip --${{ matrix.arch }} 2>&1 | tee build.log
+          # --publish never: 빌드 중 자동 publish 비활성화 (나중에 별도 step에서 업로드)
+          npx electron-builder --mac zip --${{ matrix.arch }} --publish never 2>&1 | tee build.log
           # dmg는 zip 성공 후 추가 시도 (실패해도 zip은 유지)
-          npx electron-builder --mac dmg --${{ matrix.arch }} 2>&1 | tee -a build.log || echo "dmg build failed (zip may still be ok)" >> build.log
+          npx electron-builder --mac dmg --${{ matrix.arch }} --publish never 2>&1 | tee -a build.log || echo "dmg build failed (zip may still be ok)" >> build.log
           ls -lah dist/ | tee -a build.log
           # zip이 하나라도 있어야 성공
           test -n "$(ls dist/*.zip 2>/dev/null || true)"
