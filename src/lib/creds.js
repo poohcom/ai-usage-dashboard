@@ -204,12 +204,26 @@ function cursorIdeToken() {
   }
   const keyHints = ['cursorAuth/accessToken', 'cursorAuth/cachedAccessToken', 'WorkosCursorSessionToken'];
   for (const db of cursorStateDbPaths()) {
-    for (const hint of keyHints) {
-      const jwt = scanVscdbJwt(db, hint);
-      if (!jwt) continue;
-      const payload = decodeJwt(jwt);
-      if (!payload || !payload.sub) continue;
-      return { jwt, sub: payload.sub, cookie: `${payload.sub}::${jwt}`, sourceKey: 'cursor.srcIde' };
+    // Cursor IDE 가 DB 를 잠그면 복사본으로 읽는다
+    let target = db;
+    let tmp = null;
+    try {
+      if (fs.existsSync(db)) {
+        tmp = path.join(os.tmpdir(), `cursor-state-${process.pid}-${Date.now()}.vscdb`);
+        fs.copyFileSync(db, tmp);
+        target = tmp;
+      }
+    } catch { target = db; tmp = null; }
+    try {
+      for (const hint of keyHints) {
+        const jwt = scanVscdbJwt(target, hint);
+        if (!jwt) continue;
+        const payload = decodeJwt(jwt);
+        if (!payload || !payload.sub) continue;
+        return { jwt, sub: payload.sub, cookie: `${payload.sub}::${jwt}`, sourceKey: 'cursor.srcIde' };
+      }
+    } finally {
+      if (tmp) try { fs.unlinkSync(tmp); } catch { /* */ }
     }
   }
   if (process.platform === 'darwin') {

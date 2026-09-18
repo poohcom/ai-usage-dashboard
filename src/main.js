@@ -152,7 +152,12 @@ ipcMain.handle('login:open', async (_e, id) => {
     return true;
   }
   if (!p.loginUrl) return false;
-  site.openLogin(id, p.loginUrl, () => refreshOne(id).catch(() => {}), nameOf(p));
+  const opts = {};
+  if (p.loginCookieName && p.loginCookieUrl) {
+    opts.cookieName = p.loginCookieName;
+    opts.cookieUrl = p.loginCookieUrl;
+  }
+  site.openLogin(id, p.loginUrl, () => refreshOne(id).catch(() => {}), nameOf(p), opts);
   return true;
 });
 ipcMain.handle('login:clear', async (_e, id) => {

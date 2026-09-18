@@ -1,14 +1,13 @@
 'use strict';
-// Cursor: ① Cursor IDE 로컬 세션 토큰(state.vscdb) ② 앱 내 cursor.com 웹 로그인 세션
-//   /api/usage-summary                          플랜 포함분(Auto 모델 / 지정 모델 API / 전체), 온디맨드, 결제 주기
-//   /api/dashboard/get-sand-usage-status        Grok Bot 주간 한도
-//   /api/dashboard/get-aggregated-usage-events  모델별 사용량(토큰/비용) 집계
+// Cursor: ① Cursor IDE 로컬 세션 토큰 ② 앱 로그인 파티션 쿠키 ③ (최후) 숨김 창 스크립트
+//   /api/usage-summary · /api/dashboard/get-sand-usage-status · get-aggregated-usage-events
 const creds = require('../lib/creds');
 const { request, toMs, clampPct } = require('../lib/http');
 const site = require('../lib/siteSession');
 const { t } = require('../lib/i18n');
 
 const ORIGIN = 'https://cursor.com';
+const COOKIE = 'WorkosCursorSessionToken';
 
 function num(v) {
   if (typeof v === 'number' && !Number.isNaN(v)) return v;
@@ -61,7 +60,6 @@ function parseSand(json) {
   };
 }
 
-/** 모델별 집계 → 비용 비중 막대 */
 function parseAggregated(json) {
   const rows = Array.isArray(json && json.aggregations) ? json.aggregations : [];
   const total = num(json && json.totalCostCents) || rows.reduce((s, r) => s + (num(r.totalCents) || 0), 0);
@@ -100,24 +98,35 @@ function assemble(me, summary, sand, agg, source) {
   };
 }
 
-/** Cursor IDE / 환경변수 세션 토큰으로 직접 API 호출 */
-async function viaIdeToken() {
-  const tok = creds.cursorIdeToken();
-  if (!tok) return { skipped: t('p.noCreds', { cli: 'Cursor IDE' }) };
-  const cookie = `WorkosCursorSessionToken=${tok.sub}%3A%3A${tok.jwt}`;
+function cookieHeaderValue(raw) {
+  if (!raw) return null;
+  // 이미 URL-encoded 이거나 sub::jwt 형태
+  if (raw.includes('%3A%3A') || raw.includes('%3a%3a')) return raw;
+  if (raw.includes('::')) {
+    const [sub, ...rest] = raw.split('::');
+    return `${sub}%3A%3A${rest.join('::')}`;
+  }
+  const payload = creds.decodeJwt(raw);
+  if (payload && payload.sub) return `${payload.sub}%3A%3A${raw}`;
+  return raw;
+}
+
+async function fetchWithCookie(rawCookie, source) {
+  const encoded = cookieHeaderValue(rawCookie);
+  if (!encoded) return { skipped: 'no cookie' };
   const headers = {
-    Cookie: cookie,
+    Cookie: `${COOKIE}=${encoded}`,
     Origin: ORIGIN,
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     Accept: 'application/json',
   };
   const me = await request(`${ORIGIN}/api/auth/me`, { headers });
   if (me.status === 401 || me.status === 403 || !me.json) {
-    return { skipped: `IDE token auth/me ${me.status}` };
+    return { skipped: `auth/me ${me.status}` };
   }
   const summary = await request(`${ORIGIN}/api/usage-summary`, { headers });
   if (summary.status === 401 || summary.status === 403) {
-    return { skipped: `IDE token usage-summary ${summary.status}` };
+    return { skipped: `usage-summary ${summary.status}` };
   }
   let start = Date.now() - 30 * 86400000, end = Date.now();
   if (summary.json) {
@@ -137,20 +146,32 @@ async function viaIdeToken() {
     });
     if (r.ok) agg = r.json;
   } catch { /* 선택 */ }
-  // 웹 세션 창에서도 같은 쿠키를 쓸 수 있게 심어 둔다 (로그인 버튼 없이 유지)
-  try {
-    await site.setCookie('cursor', {
-      url: ORIGIN,
-      name: 'WorkosCursorSessionToken',
-      value: tok.cookie,
-    });
-  } catch { /* 무시 */ }
-  const result = assemble(me.json, summary.json, sand, agg, t(tok.sourceKey || 'cursor.srcIde'));
+  const result = assemble(me.json, summary.json, sand, agg, source);
   if (!result) return { skipped: t('p.noWindows') };
   return result;
 }
 
+async function viaIdeToken() {
+  const tok = creds.cursorIdeToken();
+  if (!tok) return { skipped: t('p.noCreds', { cli: 'Cursor IDE' }) };
+  const result = await fetchWithCookie(tok.cookie, t(tok.sourceKey || 'cursor.srcIde'));
+  if (result.ok) {
+    try {
+      await site.setCookie('cursor', { url: ORIGIN, name: COOKIE, value: tok.cookie });
+    } catch { /* 무시 */ }
+  }
+  return result;
+}
+
+async function viaSessionCookie() {
+  const raw = await site.getCookie('cursor', { url: ORIGIN, name: COOKIE });
+  if (!raw) return { skipped: t('p.needsLogin', { site: 'cursor.com' }) };
+  return fetchWithCookie(raw, t('cursor.src'));
+}
+
 async function viaWeb() {
+  // Script failed 회피: 매번 새 숨김 창에서 강제 로드
+  site.destroyHidden('cursor');
   const script = `${site.PAGE_HELPERS}
     (async () => {
       const me = await __req('/api/auth/me');
@@ -165,7 +186,7 @@ async function viaWeb() {
       try { agg = await post('/api/dashboard/get-aggregated-usage-events', { teamId: 0, startDate: String(start), endDate: String(end) }); } catch {}
       return { ok: true, me: me.json, summary, sand, agg };
     })()`;
-  const r = await site.runInSite('cursor', ORIGIN, script);
+  const r = await site.runInSite('cursor', ORIGIN, script, { forceReload: true });
   if (r.needsLogin) return { ok: false, needsLogin: true, error: t('p.needsLogin', { site: 'cursor.com' }) };
   const result = assemble(
     r.me,
@@ -186,15 +207,30 @@ module.exports = {
   color: '#a78bfa',
   loginUrl: 'https://cursor.com/dashboard',
   hintKey: 'cursor.hint',
+  loginCookieName: COOKIE,
+  loginCookieUrl: ORIGIN,
   async fetch() {
     const notes = [];
+    for (const step of [
+      () => viaIdeToken(),
+      () => viaSessionCookie(),
+    ]) {
+      try {
+        const r = await step();
+        if (r.ok) return r;
+        if (r.skipped) notes.push(r.skipped);
+      } catch (e) { notes.push(e.message || String(e)); }
+    }
     try {
-      const ide = await viaIdeToken();
-      if (ide.ok) return ide;
-      if (ide.skipped) notes.push(ide.skipped);
-    } catch (e) { notes.push(`IDE: ${e.message}`); }
-    const w = await viaWeb();
-    if (!w.ok && notes.length) w.error = `${w.error || t('p.needsLogin', { site: 'cursor.com' })} (${notes.join('; ')})`;
-    return w;
+      const w = await viaWeb();
+      if (!w.ok && notes.length) w.error = `${w.error || t('p.needsLogin', { site: 'cursor.com' })} (${notes.join('; ')})`;
+      return w;
+    } catch (e) {
+      return {
+        ok: false,
+        needsLogin: /401|403|login|로그인/i.test(e.message || ''),
+        error: `${e.message || e}${notes.length ? ` (${notes.join('; ')})` : ''}`,
+      };
+    }
   },
 };
