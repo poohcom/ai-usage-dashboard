@@ -1,0 +1,91 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - master
+    paths:
+      - '.github/workflows/build-macos.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    name: macOS x64 + arm64
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS (Intel x64 + Apple Silicon arm64)
+        env:
+          # 코드 서명 없음 (개인 배포). Gatekeeper 경고는 사용자가 우회 가능.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --mac dmg zip --x64 --arm64
+
+      - name: List dist outputs
+        run: ls -lah dist/
+
+      - name: Prepare release assets
+        id: assets
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          mkdir -p release-out
+          # electron-builder 산출물 이름을 다운로드용으로 정리
+          shopt -s nullglob
+          for f in dist/*.dmg dist/*.zip; do
+            base=$(basename "$f")
+            lower=$(echo "$base" | tr '[:upper:]' '[:lower:]')
+            arch="unknown"
+            if echo "$lower" | grep -q 'arm64'; then arch="arm64"
+            elif echo "$lower" | grep -q 'x64\|intel\|amd64'; then arch="x64"
+            elif echo "$lower" | grep -q 'universal'; then arch="universal"
+            else
+              # x64 dmg는 종종 arch 접미사 없음
+              if [[ "$base" == *.dmg ]] || [[ "$base" == *.zip ]]; then
+                arch="x64"
+              fi
+            fi
+            ext="${base##*.}"
+            out="AI-Usage-Dashboard-${VERSION}-mac-${arch}.${ext}"
+            cp "$f" "release-out/$out"
+            echo "Prepared $out"
+          done
+          ls -lah release-out/
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-builds
+          path: release-out/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.assets.outputs.version }}
+          name: v${{ steps.assets.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: release-out/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

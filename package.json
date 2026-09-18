@@ -10,7 +10,7 @@
   "scripts": {
     "start": "electron .",
     "dist:win": "electron-builder --win",
-    "dist:mac": "electron-builder --mac",
+    "dist:mac": "electron-builder --mac dmg zip --x64 --arm64",
     "dist": "electron-builder"
   },
   "devDependencies": {
@@ -39,7 +39,9 @@
         "dmg",
         "zip"
       ],
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
     },
     "nsis": {
       "oneClick": false,

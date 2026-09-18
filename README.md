@@ -13,6 +13,9 @@ Claude · ChatGPT/Codex · Cursor · Gemini · Perplexity · Grok · Higgsfield 
 
 - `AI-Usage-Dashboard-<버전>-win-x64-setup.exe`: 설치형
 - `AI-Usage-Dashboard-<버전>-win-x64-portable.exe`: 설치 없이 실행
+- `AI-Usage-Dashboard-<버전>-mac-arm64.dmg` / `…-mac-x64.dmg`: macOS (Apple Silicon / Intel). GitHub Actions로 빌드
+
+macOS 빌드는 `.github/workflows/build-macos.yml` (태그 `v*` push 또는 Actions에서 workflow_dispatch)로 arm64·x64 dmg/zip을 만들어 Release에 올립니다.
 
 코드 서명이 없어 처음 실행 시 SmartScreen 경고가 뜨면 "추가 정보 → 실행"을 누르면 됩니다.
 
