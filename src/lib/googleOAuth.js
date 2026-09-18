@@ -25,6 +25,32 @@ const ANTIGRAVITY_SCOPES = [
 
 const ANTIGRAVITY_REDIRECT = { port: 51121, path: '/oauth-callback' };
 
+/** 진행 중 루프백 서버 — 재로그인/로그아웃 시 포트를 비운다 */
+let activeServer = null;
+let activeReject = null;
+
+function closeServer(server) {
+  if (!server) return;
+  try {
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+  } catch { /* Node 버전 */ }
+  try { server.close(); } catch { /* */ }
+}
+
+/** 진행 중 OAuth 리스너를 끊어 51121 등을 해제 (세션 삭제·재로그인 전) */
+function cancelPendingLogin() {
+  const reject = activeReject;
+  const server = activeServer;
+  activeReject = null;
+  activeServer = null;
+  closeServer(server);
+  if (reject) {
+    try {
+      reject(Object.assign(new Error(t('oauth.cancelled')), { cancelled: true }));
+    } catch { /* */ }
+  }
+}
+
 function storeFile(name) { return path.join(app.getPath('userData'), `${name}.oauth`); }
 
 function saveTokens(name, tokens) {
@@ -44,6 +70,7 @@ function loadTokens(name) {
 }
 
 function clearTokens(name) {
+  cancelPendingLogin();
   try { fs.unlinkSync(storeFile(name)); } catch { /* 없음 */ }
 }
 
@@ -77,29 +104,58 @@ async function refresh(client, tokens) {
   };
 }
 
+function listen(server, port, host) {
+  return new Promise((resolve, reject) => {
+    const onErr = (e) => {
+      server.removeListener('listening', onListening);
+      reject(e);
+    };
+    const onListening = () => {
+      server.removeListener('error', onErr);
+      resolve();
+    };
+    server.once('error', onErr);
+    server.once('listening', onListening);
+    server.listen(port, host);
+  });
+}
+
 /**
  * 시스템 브라우저로 Google 로그인 → 127.0.0.1 루프백으로 code 수신 → 토큰 교환.
  * options:
  *   redirectPort / redirectPath — Antigravity 는 51121 + /oauth-callback 고정
  *   scopes — 기본 SCOPES, Antigravity 는 ANTIGRAVITY_SCOPES
  */
-function login(client, {
+async function login(client, {
   timeoutMs = 5 * 60 * 1000,
   redirectPort = 0,
   redirectPath = '/oauth2callback',
   scopes = SCOPES,
 } = {}) {
+  // 이전 시도가 포트를 붙잡고 있으면 먼저 해제
+  cancelPendingLogin();
+  // Windows 에서 close 직후 바인드가 바로 안 될 수 있어 짧게 대기
+  if (redirectPort) await new Promise((r) => setTimeout(r, 150));
+
   return new Promise((resolve, reject) => {
     const state = crypto.randomBytes(16).toString('hex');
     const verifier = crypto.randomBytes(32).toString('base64url');
     const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
     let done = false;
     let redirectUri = null;
+    let timer = null;
+
+    const cleanup = () => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (activeServer === server) activeServer = null;
+      if (activeReject === finishErr) activeReject = null;
+      closeServer(server);
+    };
 
     const finishErr = (e) => {
       if (done) return;
       done = true;
-      try { server.close(); } catch { /* */ }
+      cleanup();
       reject(e instanceof Error ? e : new Error(String(e)));
     };
 
@@ -133,7 +189,7 @@ function login(client, {
         }
         finish(`<html><body style="font-family:sans-serif;padding:40px"><h2>${t('oauth.doneTitle')}</h2><p>${t('oauth.doneBody')}</p></body></html>`);
         done = true;
-        server.close();
+        cleanup();
         resolve({
           access_token: j.access_token,
           refresh_token: j.refresh_token,
@@ -147,15 +203,11 @@ function login(client, {
       }
     });
 
-    server.on('error', (e) => {
-      if (e && e.code === 'EADDRINUSE') {
-        finishErr(new Error(t('oauth.portInUse', { port: redirectPort || '?' })));
-      } else {
-        finishErr(e);
-      }
-    });
+    activeServer = server;
+    activeReject = finishErr;
 
-    server.listen(redirectPort, '127.0.0.1', () => {
+    listen(server, redirectPort, '127.0.0.1').then(() => {
+      if (done) return;
       const port = server.address().port;
       redirectUri = `http://127.0.0.1:${port}${redirectPath}`;
       const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
@@ -171,12 +223,18 @@ function login(client, {
         code_challenge_method: 'S256',
       }).toString();
       shell.openExternal(url.toString()).catch(() => {});
+    }).catch((e) => {
+      if (e && e.code === 'EADDRINUSE') {
+        finishErr(new Error(t('oauth.portInUse', { port: redirectPort || '?' })));
+      } else {
+        finishErr(e);
+      }
     });
 
-    setTimeout(() => {
+    timer = setTimeout(() => {
       if (done) return;
       done = true;
-      try { server.close(); } catch { /* */ }
+      cleanup();
       reject(new Error(t('oauth.timeout')));
     }, timeoutMs);
   });
@@ -195,6 +253,7 @@ function loginAntigravity(client, opts = {}) {
 module.exports = {
   login,
   loginAntigravity,
+  cancelPendingLogin,
   refresh,
   saveTokens,
   loadTokens,

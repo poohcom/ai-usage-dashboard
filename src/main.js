@@ -157,6 +157,7 @@ ipcMain.handle('login:open', async (_e, id) => {
     opts.cookieName = p.loginCookieName;
     opts.cookieUrl = p.loginCookieUrl;
   }
+  if (p.quietDeepLink) opts.quietDeepLink = true;
   site.openLogin(id, p.loginUrl, () => refreshOne(id).catch(() => {}), nameOf(p), opts);
   return true;
 });

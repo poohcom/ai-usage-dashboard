@@ -206,41 +206,43 @@ async function viaWeb() {
 }
 
 /**
- * PKCE loginDeepControl — Cursor 데스크톱 앱으로 넘기지 않고 poll 로 토큰 수령.
+ * 앱 창에서 cursor.com 웹 로그인 → WorkosCursorSessionToken 쿠키 감지.
+ * cursor:// 는 조용히 막고, 쿠키만 있으면 성공.
  */
-async function loginPkce() {
-  const { verifier, uuid, loginUrl } = cursorAuth.generateAuthParams();
-  const ac = new AbortController();
-  site.openLogin('cursor', loginUrl, () => {
-    try { ac.abort(); } catch { /* */ }
-  }, t('cursor.name'), { quietDeepLink: true });
-
-  try {
-    const { accessToken } = await cursorAuth.pollAuth(uuid, verifier, ac.signal);
-    const cookie = cursorAuth.cookieFromAccessToken(accessToken);
-    if (!cookie) throw new Error(t('cursor.loginNoToken'));
-    await site.setCookie('cursor', { url: ORIGIN, name: COOKIE, value: cookie });
-    site.closeLogin('cursor');
-    return true;
-  } catch (e) {
-    if (e && (e.cancelled || ac.signal.aborted)) {
-      throw new Error(t('cursor.loginCancelled'));
-    }
-    throw e;
-  }
+function loginWebSession() {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    site.openLogin(
+      'cursor',
+      `${ORIGIN}/settings`,
+      async () => {
+        if (settled) return;
+        settled = true;
+        try {
+          const raw = await site.getCookie('cursor', { url: ORIGIN, name: COOKIE });
+          if (raw) resolve(true);
+          else reject(Object.assign(new Error(t('cursor.loginCancelled')), { cancelled: true }));
+        } catch (e) {
+          reject(e);
+        }
+      },
+      t('cursor.name'),
+      { cookieName: COOKIE, cookieUrl: ORIGIN, quietDeepLink: true },
+    );
+  });
 }
 
 module.exports = {
   id: 'cursor',
   nameKey: 'cursor.name',
   color: '#a78bfa',
-  // login() 이 있으면 main 이 이걸 씀 (대시보드 URL → IDE 딥링크 경로 회피)
-  loginUrl: 'https://cursor.com/loginDeepControl',
+  loginUrl: `${ORIGIN}/settings`,
   hintKey: 'cursor.hint',
   loginCookieName: COOKIE,
   loginCookieUrl: ORIGIN,
+  quietDeepLink: true,
   async login() {
-    return loginPkce();
+    return loginWebSession();
   },
   async fetch() {
     const notes = [];

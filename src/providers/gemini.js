@@ -152,28 +152,45 @@ function bucketsFromSummary(json) {
     for (const b of (g.buckets || [])) {
       const rem = b.remaining && typeof b.remaining === 'object' ? b.remaining : b;
       const frac = typeof rem.remainingFraction === 'number' ? rem.remainingFraction : (typeof b.remainingFraction === 'number' ? b.remainingFraction : null);
-      const win = b.window === 'weekly' ? t('gemini.weekly') : b.window === '5h' ? t('gemini.fiveHour') : (b.displayName || b.bucketId || '');
+      const win = windowLabel(b.window || rem.window || b.bucketId || b.displayName);
       out.push({
         label: [g.displayName, win].filter(Boolean).join(' · ') || 'quota',
         remaining: frac,
         resetAt: toMs(rem.resetTime || b.resetTime || rem.resetsAt || b.resetsAt),
         note: b.description || null,
+        kind: 'summary',
       });
     }
   }
   return out;
 }
 
+function windowLabel(raw) {
+  const s = String(raw || '').toLowerCase();
+  if (!s) return '';
+  if (/week|weekly|7\s*d|주간/.test(s)) return t('gemini.weekly');
+  if (/5\s*h|5h|five.?hour|300\s*m|5시간/.test(s)) return t('gemini.fiveHour');
+  if (/day|daily|24\s*h|일일/.test(s)) return t('gemini.daily');
+  return String(raw);
+}
+
 function bucketsFromQuota(json) {
   const list = Array.isArray(json && json.buckets) ? json.buckets : [];
-  const byModel = new Map();
+  const out = [];
   for (const b of list) {
-    const key = String(b.modelId || 'all').replace(/^models\//, '');
-    const remaining = typeof b.remainingFraction === 'number' ? b.remainingFraction : (b.remainingAmount === undefined ? 1 : null);
-    const cur = byModel.get(key);
-    if (!cur || (remaining != null && cur.remaining != null && remaining < cur.remaining)) byModel.set(key, { label: key, remaining, resetAt: toMs(b.resetTime) });
+    const model = String(b.modelId || b.displayName || 'all').replace(/^models\//, '');
+    const remaining = typeof b.remainingFraction === 'number'
+      ? b.remainingFraction
+      : (b.remainingAmount === undefined ? null : null);
+    const win = windowLabel(b.window || b.quotaWindow || b.bucketId);
+    out.push({
+      label: [model !== 'all' ? model : null, win || null].filter(Boolean).join(' · ') || model,
+      remaining,
+      resetAt: toMs(b.resetTime || b.resetsAt),
+      kind: 'quota',
+    });
   }
-  return [...byModel.values()];
+  return out;
 }
 
 function bucketsFromModels(json) {
@@ -185,17 +202,48 @@ function bucketsFromModels(json) {
     const label = info.displayName || String(id).replace(/^models\//, '');
     if (!label || /^(tab_|chat_)/i.test(id)) continue;
     const q = info.quotaInfo || {};
+    // 모델 응답에 창(5h/weekly)별 항목이 있으면 펼친다
+    const nested = Array.isArray(q.buckets) ? q.buckets
+      : Array.isArray(info.quotaBuckets) ? info.quotaBuckets
+      : Array.isArray(q.windows) ? q.windows
+      : null;
+    if (nested && nested.length) {
+      for (const b of nested) {
+        const frac = typeof b.remainingFraction === 'number' ? b.remainingFraction : null;
+        if (frac == null) continue;
+        const win = windowLabel(b.window || b.name || b.id);
+        out.push({
+          label: [label, win].filter(Boolean).join(' · '),
+          remaining: frac,
+          resetAt: toMs(b.resetTime || b.resetsAt),
+          kind: 'model',
+        });
+      }
+      continue;
+    }
     const frac = typeof q.remainingFraction === 'number' ? q.remainingFraction
       : (typeof info.remainingFraction === 'number' ? info.remainingFraction : null);
     if (frac == null) continue;
+    const win = windowLabel(q.window || info.window);
     out.push({
-      label,
+      label: [label, win].filter(Boolean).join(' · '),
       remaining: frac,
       resetAt: toMs(q.resetTime || info.resetTime),
       note: null,
+      kind: 'model',
     });
   }
   return out;
+}
+
+function toWindows(buckets) {
+  return buckets.map((b) => ({
+    key: b.label,
+    label: b.label,
+    usedPct: b.remaining == null ? null : clampPct((1 - b.remaining) * 100),
+    resetAt: b.resetAt,
+    note: b.note || null,
+  }));
 }
 
 async function fetchWithSource(src) {
@@ -226,31 +274,33 @@ async function fetchWithSource(src) {
   const body = project ? { project: String(project) } : {};
   const windows = [];
   const raw = { load, project };
+  const extra = [];
+  let usedSummary = false;
+
+  // 1) 요약 API — 그룹별 5시간/주간 창이 여기 있음
   const summary = await request(`${API}:retrieveUserQuotaSummary`, { method: 'POST', headers: h, body });
+  raw.summary = summary.json || summary.text;
+  raw.summaryStatus = summary.status;
   if (summary.ok) {
-    raw.summary = summary.json;
-    for (const b of bucketsFromSummary(summary.json)) {
-      windows.push({ key: b.label, label: b.label, usedPct: b.remaining == null ? null : clampPct((1 - b.remaining) * 100), resetAt: b.resetAt, note: b.note });
+    const fromSummary = bucketsFromSummary(summary.json);
+    if (fromSummary.length) {
+      windows.push(...toWindows(fromSummary));
+      usedSummary = true;
     }
   }
+
+  // 2) 요약이 비었거나 403 등이면 상세 쿼터 → 모델 폴백
   if (!windows.length) {
     const q = await request(`${API}:retrieveUserQuota`, { method: 'POST', headers: h, body });
     raw.quota = q.json || q.text;
-    if (q.ok) {
-      for (const b of bucketsFromQuota(q.json)) {
-        windows.push({ key: b.label, label: b.label, usedPct: b.remaining == null ? null : clampPct((1 - b.remaining) * 100), resetAt: b.resetAt });
-      }
-    }
+    raw.quotaStatus = q.status;
+    if (q.ok) windows.push(...toWindows(bucketsFromQuota(q.json)));
   }
-  // 요약 API 가 라이선스(403 #3501) 등으로 막혀도 모델별 remainingFraction 은 내려오는 경우가 많음
   if (!windows.length) {
     const m = await request(`${API}:fetchAvailableModels`, { method: 'POST', headers: h, body });
     raw.models = m.json || m.text;
-    if (m.ok) {
-      for (const b of bucketsFromModels(m.json)) {
-        windows.push({ key: b.label, label: b.label, usedPct: b.remaining == null ? null : clampPct((1 - b.remaining) * 100), resetAt: b.resetAt, note: b.note });
-      }
-    }
+    raw.modelsStatus = m.status;
+    if (m.ok) windows.push(...toWindows(bucketsFromModels(m.json)));
     if (!windows.length) {
       const msg = (summary.json && summary.json.error && summary.json.error.message)
         || (m.json && m.json.error && m.json.error.message)
@@ -260,15 +310,22 @@ async function fetchWithSource(src) {
       throw err;
     }
   }
+
   windows.sort((a, b) => (b.usedPct ?? -1) - (a.usedPct ?? -1));
   if (!windows.length) {
     const err = new Error(t('gemini.empty'));
     err.raw = raw;
     throw err;
   }
-  const extra = [];
   if (tier) extra.push({ label: t('gemini.tier'), value: tier });
   if (project) extra.push({ label: t('gemini.project'), value: String(project) });
+  // 요약 API 가 막혀 모델%만 보일 때 안내
+  if (!usedSummary) {
+    const why = summary.status === 403 ? t('gemini.summaryBlocked')
+      : summary.status && summary.status !== 200 ? t('gemini.summaryFail', { status: summary.status })
+      : t('gemini.summaryEmpty');
+    extra.push({ label: t('gemini.summaryNote'), value: why });
+  }
   let account = src.tokens.email || null;
   if (!account && src.tokens.id_token) { const c = creds.decodeJwt(src.tokens.id_token); account = (c && c.email) || null; }
   return { ok: true, source: src.name, account, plan: tier, windows, extra, raw };

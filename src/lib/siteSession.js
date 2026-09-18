@@ -327,6 +327,45 @@ function closeLogin(id) {
   if (w && !w.isDestroyed()) w.close();
 }
 
+/**
+ * 시스템 브라우저에서 OAuth 할 때 쓰는 대기 창 (닫으면 onClosed).
+ * Cursor PKCE 등 — Electron 안에서 loginDeepControl 을 열면 승인 완료가 깨질 수 있음.
+ */
+function openLoginWait(id, { title, message, detail, onClosed } = {}) {
+  let w = loginWindows.get(id);
+  if (w && !w.isDestroyed()) { w.focus(); return w; }
+  const safe = (s) => String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  w = new BrowserWindow({
+    width: 460,
+    height: 240,
+    title: title || t('login.window', { name: id }),
+    autoHideMenuBar: true,
+    resizable: false,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+  });
+  loginWindows.set(id, w);
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    body{font-family:Segoe UI,system-ui,sans-serif;margin:0;padding:28px 28px 20px;background:#111;color:#eee}
+    h1{font-size:16px;font-weight:600;margin:0 0 10px}
+    p{font-size:13px;line-height:1.45;margin:0 0 8px;color:#bbb}
+    .d{font-size:12px;color:#888}
+  </style></head><body>
+    <h1>${safe(message || title)}</h1>
+    <p>${safe(detail || '')}</p>
+    <p class="d">${safe(t('cursor.loginWaitClose'))}</p>
+  </body></html>`;
+  w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  let settled = false;
+  w.on('closed', () => {
+    loginWindows.delete(id);
+    if (settled) return;
+    settled = true;
+    if (onClosed) onClosed();
+  });
+  return w;
+}
+
 function destroyAll() {
   for (const w of hidden.values()) if (!w.isDestroyed()) w.destroy();
   hidden.clear();
@@ -335,6 +374,6 @@ function destroyAll() {
 }
 
 module.exports = {
-  runInSite, openLogin, closeLogin, clearSession, destroyAll, PAGE_HELPERS,
+  runInSite, openLogin, openLoginWait, closeLogin, clearSession, destroyAll, PAGE_HELPERS,
   setCookie, getCookie, getSession, destroyHidden,
 };
