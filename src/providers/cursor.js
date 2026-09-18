@@ -173,79 +173,69 @@ async function viaSessionCookie() {
   return fetchWithCookie(raw, t('cursor.src'));
 }
 
-async function viaWeb() {
-  // Script failed 회피: 매번 새 숨김 창에서 강제 로드
-  site.destroyHidden('cursor');
-  const script = `${site.PAGE_HELPERS}
-    (async () => {
-      const me = await __req('/api/auth/me');
-      if (me.status === 401 || me.status === 403 || !me.json) return { needsLogin: true, status: me.status };
-      const summary = await __req('/api/usage-summary');
-      if (summary.status === 401 || summary.status === 403) return { needsLogin: true, status: summary.status };
-      const post = (u, body) => __req(u, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: '${ORIGIN}' }, body: JSON.stringify(body || {}) });
-      let start = Date.now() - 30 * 86400000, end = Date.now();
-      if (summary.json) { const s = Date.parse(summary.json.billingCycleStart), e = Date.parse(summary.json.billingCycleEnd); if (s) start = s; if (e) end = e; }
-      let sand = null, agg = null;
-      try { sand = await post('/api/dashboard/get-sand-usage-status', {}); } catch {}
-      try { agg = await post('/api/dashboard/get-aggregated-usage-events', { teamId: 0, startDate: String(start), endDate: String(end) }); } catch {}
-      return { ok: true, me: me.json, summary, sand, agg };
-    })()`;
-  const r = await site.runInSite('cursor', ORIGIN, script, { forceReload: true });
-  if (r.needsLogin) return { ok: false, needsLogin: true, error: t('p.needsLogin', { site: 'cursor.com' }) };
-  const result = assemble(
-    r.me,
-    r.summary && r.summary.json,
-    r.sand && r.sand.ok ? r.sand.json : null,
-    r.agg && r.agg.ok ? r.agg.json : null,
-    t('cursor.src'),
-  );
-  if (!result) {
-    return { ok: false, error: t('p.parseFailStatus', { info: `usage-summary ${r.summary && r.summary.status}` }), raw: { summary: r.summary && (r.summary.json || r.summary.text) } };
-  }
-  return result;
-}
-
 /**
- * 앱 창에서 cursor.com 웹 로그인 → WorkosCursorSessionToken 쿠키 감지.
- * cursor:// 는 조용히 막고, 쿠키만 있으면 성공.
+ * PKCE: 시스템 브라우저에서 로그인 + Yes/Approve → poll 로 JWT → 세션 쿠키.
+ * Electron 안 cursor.com 로드는 Cloudflare/지연으로 "페이지 로드 시간 초과"가 자주 나서 쓰지 않음.
  */
-function loginWebSession() {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    site.openLogin(
-      'cursor',
-      `${ORIGIN}/settings`,
-      async () => {
-        if (settled) return;
-        settled = true;
-        try {
-          const raw = await site.getCookie('cursor', { url: ORIGIN, name: COOKIE });
-          if (raw) resolve(true);
-          else reject(Object.assign(new Error(t('cursor.loginCancelled')), { cancelled: true }));
-        } catch (e) {
-          reject(e);
-        }
-      },
-      t('cursor.name'),
-      { cookieName: COOKIE, cookieUrl: ORIGIN, quietDeepLink: true },
-    );
+async function loginPkce() {
+  const { shell } = require('electron');
+  const { verifier, uuid, loginUrl } = cursorAuth.generateAuthParams();
+  const ac = new AbortController();
+  let finished = false;
+  site.openLoginWait('cursor', {
+    title: t('login.window', { name: t('cursor.name') }),
+    message: t('cursor.loginWaiting'),
+    detail: t('cursor.loginWaitingDetail'),
+    onClosed: () => {
+      if (finished) return;
+      try { ac.abort(); } catch { /* */ }
+    },
   });
+  try {
+    await shell.openExternal(loginUrl);
+  } catch (e) {
+    finished = true;
+    site.closeLogin('cursor');
+    throw new Error(`${t('cursor.loginOpenFail')}: ${e.message || e}`);
+  }
+
+  try {
+    const { accessToken } = await cursorAuth.pollAuth(uuid, verifier, ac.signal);
+    const cookie = cursorAuth.cookieFromAccessToken(accessToken);
+    if (!cookie) throw new Error(t('cursor.loginNoToken'));
+    await site.setCookie('cursor', { url: ORIGIN, name: COOKIE, value: cookie });
+    // 쿠키로 API 가 되는지 바로 확인 (숨김 창 로드 없음)
+    const check = await fetchWithCookie(cookie, t('cursor.src'));
+    if (!check.ok) {
+      throw new Error(check.skipped || check.error || t('cursor.loginNoToken'));
+    }
+    finished = true;
+    site.closeLogin('cursor');
+    return true;
+  } catch (e) {
+    const cancelled = !!(e && (e.cancelled || ac.signal.aborted));
+    finished = true;
+    site.closeLogin('cursor');
+    if (cancelled) throw new Error(t('cursor.loginCancelled'));
+    throw e;
+  }
 }
 
 module.exports = {
   id: 'cursor',
   nameKey: 'cursor.name',
   color: '#a78bfa',
-  loginUrl: `${ORIGIN}/settings`,
+  loginUrl: 'https://cursor.com/loginDeepControl',
   hintKey: 'cursor.hint',
   loginCookieName: COOKIE,
   loginCookieUrl: ORIGIN,
   quietDeepLink: true,
   async login() {
-    return loginWebSession();
+    return loginPkce();
   },
   async fetch() {
     const notes = [];
+    // Electron 숨김 창으로 cursor.com 을 열지 않음 (페이지 로드 시간 초과 / Cloudflare)
     for (const step of [
       () => viaIdeToken(),
       () => viaSessionCookie(),
@@ -256,16 +246,10 @@ module.exports = {
         if (r.skipped) notes.push(r.skipped);
       } catch (e) { notes.push(e.message || String(e)); }
     }
-    try {
-      const w = await viaWeb();
-      if (!w.ok && notes.length) w.error = `${w.error || t('p.needsLogin', { site: 'cursor.com' })} (${notes.join('; ')})`;
-      return w;
-    } catch (e) {
-      return {
-        ok: false,
-        needsLogin: /401|403|login|로그인/i.test(e.message || ''),
-        error: `${e.message || e}${notes.length ? ` (${notes.join('; ')})` : ''}`,
-      };
-    }
+    return {
+      ok: false,
+      needsLogin: true,
+      error: notes.length ? notes.join('; ') : t('p.needsLogin', { site: 'cursor.com' }),
+    };
   },
 };
