@@ -40,8 +40,8 @@ function userIdFromJwt(jwt) {
 function cookieFromAccessToken(accessToken) {
   const userId = userIdFromJwt(accessToken);
   if (!userId || !accessToken) return null;
-  // 브라우저 Set-Cookie 와 같이 :: 를 %3A%3A 로 저장
-  return `${userId}%3A%3A${accessToken}`;
+  // jar/저장용은 :: 원문. Cookie 헤더는 호출측에서 %3A%3A 로 인코딩.
+  return `${userId}::${accessToken}`;
 }
 
 function generateAuthParams() {

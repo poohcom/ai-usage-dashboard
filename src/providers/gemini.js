@@ -1,15 +1,23 @@
 'use strict';
 // Gemini (Antigravity / Gemini Code Assist 쿼터)
-//   토큰 출처(우선순위): ① 이 앱에서 Google 로그인한 토큰(Antigravity 공개 OAuth 클라이언트)
-//                       ② agy CLI / Antigravity 가 저장한 토큰   ③ Gemini CLI 토큰(구형, 서버가 거부할 수 있음)
-//   API: cloudcode-pa loadCodeAssist → (onboardUser) → retrieveUserQuotaSummary / retrieveUserQuota
-//   OAuth 클라이언트 값은 소스에 없고, 설치된 agy / Antigravity IDE 실행파일에서 런타임에 추출한다.
+//   토큰 출처(우선순위): ① 실행 중 Antigravity/agy 로컬 LS (5h·주간 요약)
+//                       ② 이 앱 Google 로그인 / agy 토큰 / Gemini CLI
+//   API: 로컬 RetrieveUserQuotaSummary → cloudcode-pa(daily 포함) retrieveUserQuotaSummary → 모델 폴백
+//   OAuth 클라이언트 값은 소스에 없고, 설치된 agy / Antigravity 실행파일에서 런타임에 추출한다.
+const http = require('http');
+const https = require('https');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 const creds = require('../lib/creds');
 const oauth = require('../lib/googleOAuth');
 const { request, toMs, clampPct } = require('../lib/http');
 const { t } = require('../lib/i18n');
 
-const API = 'https://cloudcode-pa.googleapis.com/v1internal';
+const execFileAsync = promisify(execFile);
+const API_HOSTS = [
+  'https://daily-cloudcode-pa.googleapis.com/v1internal',
+  'https://cloudcode-pa.googleapis.com/v1internal',
+];
 const STORE = 'gemini-antigravity';
 const memRefreshed = new Map(); // source -> {access_token, expiry}
 let clientCache = null;
@@ -106,11 +114,23 @@ function projectId(v) {
   return null;
 }
 
+async function postCloudCode(path, token, body) {
+  let last = null;
+  for (const base of API_HOSTS) {
+    const res = await request(`${base}:${path}`, { method: 'POST', headers: headers(token), body });
+    last = res;
+    if (res.ok) return res;
+    // 403/404 는 다음 호스트 시도, 401 은 토큰 문제라 중단
+    if (res.status === 401) return res;
+  }
+  return last;
+}
+
 async function loadCodeAssist(token, projectHint) {
   const body = { metadata: METADATA };
   const hint = projectId(projectHint);
   if (hint) body.cloudaicompanionProject = hint;
-  const res = await request(`${API}:loadCodeAssist`, { method: 'POST', headers: headers(token), body });
+  const res = await postCloudCode('loadCodeAssist', token, body);
   if (!res.ok) {
     const msg = (res.json && res.json.error && res.json.error.message) || res.text || '';
     const err = new Error(`loadCodeAssist ${res.status}: ${msg}`.trim());
@@ -128,7 +148,7 @@ async function onboard(token, load) {
   const hint = projectId(creds.geminiProjectHint());
   if (!tier.userDefinedCloudaicompanionProject && hint) body.cloudaicompanionProject = hint;
   for (let i = 0; i < 5; i++) {
-    const res = await request(`${API}:onboardUser`, { method: 'POST', headers: headers(token), body });
+    const res = await postCloudCode('onboardUser', token, body);
     if (!res.ok) return null;
     const op = res.json || {};
     if (op.done) {
@@ -140,13 +160,23 @@ async function onboard(token, load) {
   return null;
 }
 
+function summaryRoot(json) {
+  if (!json || typeof json !== 'object') return null;
+  if (Array.isArray(json.groups)) return json;
+  if (json.response && Array.isArray(json.response.groups)) return json.response;
+  return null;
+}
+
 function bucketsFromSummary(json) {
   const out = [];
-  const groups = Array.isArray(json && json.groups) ? json.groups : [];
+  const root = summaryRoot(json);
+  const groups = root && Array.isArray(root.groups) ? root.groups : [];
   for (const g of groups) {
     for (const b of (g.buckets || [])) {
       const rem = b.remaining && typeof b.remaining === 'object' ? b.remaining : b;
-      const frac = typeof rem.remainingFraction === 'number' ? rem.remainingFraction : (typeof b.remainingFraction === 'number' ? b.remainingFraction : null);
+      const frac = typeof rem.remainingFraction === 'number' ? rem.remainingFraction
+        : (typeof b.remainingFraction === 'number' ? b.remainingFraction : null);
+      if (frac == null) continue;
       const win = windowLabel(b.window || rem.window || b.bucketId || b.displayName);
       out.push({
         label: [g.displayName, win].filter(Boolean).join(' · ') || 'quota',
@@ -158,6 +188,153 @@ function bucketsFromSummary(json) {
     }
   }
   return out;
+}
+
+/** 로컬 HTTPS(자체 서명)용 — 127.0.0.1 만 허용 */
+function loopbackFetch(url, { method = 'POST', headers: hdrs = {}, body = '{}', timeoutMs = 8000 } = {}) {
+  return new Promise((resolve) => {
+    let u;
+    try { u = new URL(url); } catch {
+      resolve({ ok: false, status: 0, json: null, text: 'bad url' });
+      return;
+    }
+    if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') {
+      resolve({ ok: false, status: 0, json: null, text: 'non-loopback' });
+      return;
+    }
+    const lib = u.protocol === 'https:' ? https : http;
+    const req = lib.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port,
+      path: u.pathname + u.search,
+      method,
+      headers: hdrs,
+      rejectUnauthorized: false,
+      timeout: timeoutMs,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* */ }
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode || 0,
+          json,
+          text: json ? undefined : text.slice(0, 2000),
+        });
+      });
+    });
+    req.on('error', (e) => resolve({ ok: false, status: 0, json: null, text: e.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, status: 0, json: null, text: 'timeout' }); });
+    req.write(typeof body === 'string' ? body : JSON.stringify(body));
+    req.end();
+  });
+}
+
+function parseFlag(cmd, name) {
+  if (!cmd) return null;
+  const re = new RegExp(`--${name}(?:[=\\s]+)([^\\s]+)`, 'i');
+  const m = cmd.match(re);
+  return m ? m[1] : null;
+}
+
+async function listLanguageServerProcs() {
+  const out = [];
+  if (process.platform === 'win32') {
+    try {
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        ['-NoProfile', '-Command',
+          "Get-CimInstance Win32_Process -Filter \"Name='language_server.exe'\" | ForEach-Object { ($_.ProcessId.ToString() + '|' + $_.CommandLine) }"],
+        { timeout: 8000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 },
+      );
+      for (const line of String(stdout || '').split(/\r?\n/)) {
+        const i = line.indexOf('|');
+        if (i < 0) continue;
+        const pid = Number(line.slice(0, i));
+        const cmd = line.slice(i + 1);
+        if (!pid || !/antigravity/i.test(cmd)) continue;
+        out.push({
+          pid,
+          csrf: parseFlag(cmd, 'csrf_token'),
+          extPort: Number(parseFlag(cmd, 'extension_server_port')) || null,
+          cloudEndpoint: parseFlag(cmd, 'cloud_code_endpoint'),
+        });
+      }
+    } catch { /* 무시 */ }
+  } else {
+    try {
+      const { stdout } = await execFileAsync('ps', ['-ax', '-o', 'pid=,command='], { timeout: 8000, maxBuffer: 2 * 1024 * 1024 });
+      for (const line of String(stdout || '').split(/\n/)) {
+        const m = line.match(/^\s*(\d+)\s+(.+)$/);
+        if (!m) continue;
+        const cmd = m[2];
+        if (!/language_server/i.test(cmd) || !/antigravity/i.test(cmd)) continue;
+        out.push({
+          pid: Number(m[1]),
+          csrf: parseFlag(cmd, 'csrf_token'),
+          extPort: Number(parseFlag(cmd, 'extension_server_port')) || null,
+          cloudEndpoint: parseFlag(cmd, 'cloud_code_endpoint'),
+        });
+      }
+    } catch { /* 무시 */ }
+  }
+  return out;
+}
+
+async function listeningPorts(pid) {
+  const ports = new Set();
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execFileAsync('netstat', ['-ano'], { timeout: 8000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+      const re = new RegExp(`TCP\\s+127\\.0\\.0\\.1:(\\d+)\\s+.*?LISTENING\\s+${pid}\\s*$`, 'i');
+      for (const line of String(stdout || '').split(/\r?\n/)) {
+        const m = line.trim().match(re) || line.match(new RegExp(`127\\.0\\.0\\.1:(\\d+).+LISTENING\\s+${pid}\\b`, 'i'));
+        if (m) ports.add(Number(m[1]));
+      }
+    } else {
+      const { stdout } = await execFileAsync('lsof', ['-nP', `-iTCP`, '-sTCP:LISTEN', '-a', '-p', String(pid)], { timeout: 8000 });
+      for (const m of String(stdout || '').matchAll(/:(\d+)\s+\(LISTEN\)/g)) ports.add(Number(m[1]));
+    }
+  } catch { /* 무시 */ }
+  return [...ports];
+}
+
+/** 실행 중인 Antigravity/agy 로컬 LS 에서 5h·주간 요약 조회 */
+async function fetchLocalSummary() {
+  const procs = await listLanguageServerProcs();
+  for (const proc of procs) {
+    const ports = await listeningPorts(proc.pid);
+    if (proc.extPort) ports.push(proc.extPort);
+    const uniq = [...new Set(ports.filter((p) => p > 0))];
+    const hdrs = {
+      'Content-Type': 'application/json',
+      'Connect-Protocol-Version': '1',
+    };
+    if (proc.csrf) hdrs['X-Codeium-Csrf-Token'] = proc.csrf;
+    for (const port of uniq) {
+      for (const scheme of ['https', 'http']) {
+        const url = `${scheme}://127.0.0.1:${port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary`;
+        const res = await loopbackFetch(url, { headers: hdrs, body: '{}' });
+        if (!res.ok || !res.json) continue;
+        const buckets = bucketsFromSummary(res.json);
+        if (!buckets.length) continue;
+        return {
+          ok: true,
+          source: t('gemini.srcLocal'),
+          account: null,
+          plan: null,
+          windows: toWindows(buckets),
+          extra: [{ label: t('gemini.summaryNote'), value: t('gemini.srcLocal') }],
+          raw: { local: res.json, port, scheme },
+        };
+      }
+    }
+  }
+  return null;
 }
 
 function windowLabel(raw) {
@@ -271,36 +448,74 @@ async function fetchWithSource(src) {
   const raw = { load, project };
   const extra = [];
   let usedSummary = false;
+  let summaryStatus = null;
 
-  // 1) 요약 API — 그룹별 5시간/주간 창이 여기 있음
-  const summary = await request(`${API}:retrieveUserQuotaSummary`, { method: 'POST', headers: h, body });
-  raw.summary = summary.json || summary.text;
-  raw.summaryStatus = summary.status;
-  if (summary.ok) {
-    const fromSummary = bucketsFromSummary(summary.json);
-    if (fromSummary.length) {
-      windows.push(...toWindows(fromSummary));
-      usedSummary = true;
+  // 0) 실행 중 Antigravity 로컬 LS — 5h/주간 공유 풀이 여기 있음
+  try {
+    const local = await fetchLocalSummary();
+    if (local && local.windows && local.windows.length) {
+      local.account = local.account || (src.tokens.email || null);
+      if (!local.account && src.tokens.id_token) {
+        const c = creds.decodeJwt(src.tokens.id_token);
+        local.account = (c && c.email) || null;
+      }
+      if (tier) local.extra = [...(local.extra || []), { label: t('gemini.tier'), value: tier }];
+      if (project) local.extra = [...(local.extra || []), { label: t('gemini.project'), value: String(project) }];
+      local.plan = local.plan || tier;
+      return local;
     }
+  } catch { /* 로컬 실패 시 원격 계속 */ }
+
+  // 1) 원격 요약 API (daily 호스트 우선 — Antigravity LS 와 동일)
+  let summary = null;
+  for (const base of API_HOSTS) {
+    summary = await request(`${base}:retrieveUserQuotaSummary`, { method: 'POST', headers: h, body });
+    summaryStatus = summary.status;
+    raw.summary = summary.json || summary.text;
+    raw.summaryStatus = summary.status;
+    raw.summaryHost = base;
+    if (summary.ok) {
+      const fromSummary = bucketsFromSummary(summary.json);
+      if (fromSummary.length) {
+        windows.push(...toWindows(fromSummary));
+        usedSummary = true;
+        break;
+      }
+    }
+    if (summary.status === 401) break;
   }
 
   // 2) 요약이 비었거나 403 등이면 상세 쿼터 → 모델 폴백
   if (!windows.length) {
-    const q = await request(`${API}:retrieveUserQuota`, { method: 'POST', headers: h, body });
-    raw.quota = q.json || q.text;
-    raw.quotaStatus = q.status;
-    if (q.ok) windows.push(...toWindows(bucketsFromQuota(q.json)));
+    let q = null;
+    for (const base of API_HOSTS) {
+      q = await request(`${base}:retrieveUserQuota`, { method: 'POST', headers: h, body });
+      raw.quota = q.json || q.text;
+      raw.quotaStatus = q.status;
+      if (q.ok) {
+        windows.push(...toWindows(bucketsFromQuota(q.json)));
+        if (windows.length) break;
+      }
+      if (q.status === 401) break;
+    }
   }
   if (!windows.length) {
-    const m = await request(`${API}:fetchAvailableModels`, { method: 'POST', headers: h, body });
-    raw.models = m.json || m.text;
-    raw.modelsStatus = m.status;
-    if (m.ok) windows.push(...toWindows(bucketsFromModels(m.json)));
+    let m = null;
+    for (const base of API_HOSTS) {
+      m = await request(`${base}:fetchAvailableModels`, { method: 'POST', headers: h, body });
+      raw.models = m.json || m.text;
+      raw.modelsStatus = m.status;
+      if (m.ok) {
+        windows.push(...toWindows(bucketsFromModels(m.json)));
+        if (windows.length) break;
+      }
+      if (m.status === 401) break;
+    }
     if (!windows.length) {
-      const msg = (summary.json && summary.json.error && summary.json.error.message)
-        || (m.json && m.json.error && m.json.error.message)
+      const msg = (summary && summary.json && summary.json.error && summary.json.error.message)
+        || (m && m.json && m.json.error && m.json.error.message)
         || '';
-      const err = new Error(t('gemini.quotaFail', { s1: summary.status, s2: m.status, msg }));
+      const err = new Error(t('gemini.quotaFail', { s1: summaryStatus || 0, s2: (m && m.status) || 0, msg }));
       err.raw = raw;
       throw err;
     }
@@ -316,10 +531,11 @@ async function fetchWithSource(src) {
   if (project) extra.push({ label: t('gemini.project'), value: String(project) });
   // 요약 API 가 막혀 모델%만 보일 때 안내
   if (!usedSummary) {
-    const why = summary.status === 403 ? t('gemini.summaryBlocked')
-      : summary.status && summary.status !== 200 ? t('gemini.summaryFail', { status: summary.status })
+    const why = summaryStatus === 403 ? t('gemini.summaryBlocked')
+      : summaryStatus && summaryStatus !== 200 ? t('gemini.summaryFail', { status: summaryStatus })
       : t('gemini.summaryEmpty');
     extra.push({ label: t('gemini.summaryNote'), value: why });
+    extra.push({ label: t('gemini.localHint'), value: t('gemini.localHintVal') });
   }
   let account = src.tokens.email || null;
   if (!account && src.tokens.id_token) { const c = creds.decodeJwt(src.tokens.id_token); account = (c && c.email) || null; }
@@ -356,8 +572,21 @@ module.exports = {
   async logout() { oauth.clearTokens(STORE); memRefreshed.clear(); },
 
   async fetch() {
+    // Antigravity 앱/agy 가 켜져 있으면 로그인 없이 5h·주간 요약 가능
+    try {
+      const local = await fetchLocalSummary();
+      if (local) return local;
+    } catch { /* 원격 폴백 */ }
+
     const list = await sources();
-    if (!list.length) return { ok: false, needsLogin: true, error: t('gemini.noSources') };
+    if (!list.length) {
+      return {
+        ok: false,
+        needsLogin: true,
+        error: t('gemini.noSources'),
+        extra: [{ label: t('gemini.localHint'), value: t('gemini.localHintVal') }],
+      };
+    }
     const errors = [];
     for (const src of list) {
       try { return await fetchWithSource(src); }

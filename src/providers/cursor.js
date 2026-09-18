@@ -99,9 +99,56 @@ function assemble(me, summary, sand, agg, source) {
   };
 }
 
+/** raw → JWT 와 후보 user id 목록 */
+function splitCookieParts(raw) {
+  if (!raw) return { jwt: null, ids: [] };
+  let jwt = raw;
+  const ids = [];
+  const push = (id) => {
+    if (!id) return;
+    const s = String(id);
+    if (!ids.includes(s)) ids.push(s);
+  };
+  if (/%3A%3A/i.test(raw)) {
+    const i = raw.search(/%3A%3A/i);
+    push(decodeURIComponent(raw.slice(0, i)));
+    jwt = raw.slice(i).replace(/^%3A%3A/i, '');
+  } else if (raw.includes('::')) {
+    const i = raw.indexOf('::');
+    push(raw.slice(0, i));
+    jwt = raw.slice(i + 2);
+  }
+  const payload = creds.decodeJwt(jwt);
+  if (payload && payload.sub != null) {
+    const full = String(payload.sub);
+    push(full);
+    push(cursorAuth.userIdFromJwt(jwt));
+  }
+  return { jwt, ids: ids.filter(Boolean), payload };
+}
+
+/**
+ * WorkosCursorSessionToken 후보들.
+ * auth/me 는 sub::jwt 만 받고, bare JWT 는 204 를 낸다.
+ * full sub(github|user_…) / user_… 둘 다 시도.
+ */
+function cookieHeaderVariants(raw) {
+  const { jwt, ids } = splitCookieParts(raw);
+  if (!jwt) return [];
+  const out = [];
+  const add = (v) => { if (v && !out.includes(v)) out.push(v); };
+  for (const id of ids) {
+    add(`${id}%3A%3A${jwt}`);
+    // | 등 특수문자 인코딩 변형
+    if (/[^A-Za-z0-9_.-]/.test(id)) add(`${encodeURIComponent(id)}%3A%3A${jwt}`);
+  }
+  // 이미 올바른 형태면 그대로도 시도
+  if (/%3A%3A/i.test(raw) || raw.includes('::')) add(cookieHeaderValue(raw));
+  return out;
+}
+
 function cookieHeaderValue(raw) {
   if (!raw) return null;
-  // 이미 URL-encoded 이거나 sub::jwt 형태
   if (raw.includes('%3A%3A') || raw.includes('%3a%3a')) return raw;
   if (raw.includes('::')) {
     const [sub, ...rest] = raw.split('::');
@@ -115,44 +162,76 @@ function cookieHeaderValue(raw) {
   return raw;
 }
 
+function cookieStorageValue(accessToken) {
+  // Electron 쿠키 jar 에는 :: 원문 저장 (브라우저 DevTools 와 동일)
+  const uid = cursorAuth.userIdFromJwt(accessToken);
+  if (!uid || !accessToken) return null;
+  return `${uid}::${accessToken}`;
+}
+
 async function fetchWithCookie(rawCookie, source) {
-  const encoded = cookieHeaderValue(rawCookie);
-  if (!encoded) return { skipped: 'no cookie' };
-  const headers = {
-    Cookie: `${COOKIE}=${encoded}`,
+  const variants = cookieHeaderVariants(rawCookie);
+  if (!variants.length) return { skipped: 'no cookie' };
+  const baseHeaders = {
     Origin: ORIGIN,
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     Accept: 'application/json',
   };
-  const me = await request(`${ORIGIN}/api/auth/me`, { headers });
-  if (me.status === 401 || me.status === 403 || !me.json) {
-    return { skipped: `auth/me ${me.status}` };
+
+  let lastSkip = null;
+  for (const encoded of variants) {
+    const headers = { ...baseHeaders, Cookie: `${COOKIE}=${encoded}` };
+    const me = await request(`${ORIGIN}/api/auth/me`, { headers });
+    // 204 = bare/잘못된 쿠키 형식. 다음 후보 시도.
+    if (me.status === 204 || me.status === 404) {
+      lastSkip = `auth/me ${me.status}`;
+      continue;
+    }
+    if (me.status === 401 || me.status === 403) {
+      lastSkip = `auth/me ${me.status}`;
+      continue;
+    }
+
+    const summary = await request(`${ORIGIN}/api/usage-summary`, { headers });
+    if (summary.status === 401 || summary.status === 403) {
+      lastSkip = `usage-summary ${summary.status}`;
+      continue;
+    }
+    // auth/me 가 비어 있어도 usage-summary 가 오면 성공으로 처리
+    if (!summary.json && !(me.json && me.status === 200)) {
+      lastSkip = `auth/me ${me.status} (no usage)`;
+      continue;
+    }
+
+    let start = Date.now() - 30 * 86400000, end = Date.now();
+    if (summary.json) {
+      const s = Date.parse(summary.json.billingCycleStart), e = Date.parse(summary.json.billingCycleEnd);
+      if (s) start = s; if (e) end = e;
+    }
+    const postHeaders = { ...headers, 'Content-Type': 'application/json' };
+    let sand = null, agg = null;
+    const userId = me.json && (me.json.id != null ? me.json.id : null);
+    try {
+      const r = await request(`${ORIGIN}/api/dashboard/get-sand-usage-status`, { method: 'POST', headers: postHeaders, body: '{}' });
+      if (r.ok) sand = r.json;
+    } catch { /* 선택 */ }
+    try {
+      const body = { teamId: 0, startDate: String(start), endDate: String(end) };
+      if (userId != null) body.userId = userId;
+      const r = await request(`${ORIGIN}/api/dashboard/get-aggregated-usage-events`, {
+        method: 'POST', headers: postHeaders, body: JSON.stringify(body),
+      });
+      if (r.ok) agg = r.json;
+    } catch { /* 선택 */ }
+
+    const result = assemble(me.json || {}, summary.json, sand, agg, source);
+    if (!result) {
+      lastSkip = t('p.noWindows');
+      continue;
+    }
+    return result;
   }
-  const summary = await request(`${ORIGIN}/api/usage-summary`, { headers });
-  if (summary.status === 401 || summary.status === 403) {
-    return { skipped: `usage-summary ${summary.status}` };
-  }
-  let start = Date.now() - 30 * 86400000, end = Date.now();
-  if (summary.json) {
-    const s = Date.parse(summary.json.billingCycleStart), e = Date.parse(summary.json.billingCycleEnd);
-    if (s) start = s; if (e) end = e;
-  }
-  const postHeaders = { ...headers, 'Content-Type': 'application/json' };
-  let sand = null, agg = null;
-  try {
-    const r = await request(`${ORIGIN}/api/dashboard/get-sand-usage-status`, { method: 'POST', headers: postHeaders, body: '{}' });
-    if (r.ok) sand = r.json;
-  } catch { /* 선택 */ }
-  try {
-    const r = await request(`${ORIGIN}/api/dashboard/get-aggregated-usage-events`, {
-      method: 'POST', headers: postHeaders,
-      body: JSON.stringify({ teamId: 0, startDate: String(start), endDate: String(end) }),
-    });
-    if (r.ok) agg = r.json;
-  } catch { /* 선택 */ }
-  const result = assemble(me.json, summary.json, sand, agg, source);
-  if (!result) return { skipped: t('p.noWindows') };
-  return result;
+  return { skipped: lastSkip || 'auth/me failed' };
 }
 
 async function viaIdeToken() {
@@ -201,13 +280,22 @@ async function loginPkce() {
 
   try {
     const { accessToken } = await cursorAuth.pollAuth(uuid, verifier, ac.signal);
-    const cookie = cursorAuth.cookieFromAccessToken(accessToken);
+    const payload = creds.decodeJwt(accessToken);
+    if (!payload || !payload.sub) {
+      throw new Error(t('cursor.loginNoToken'));
+    }
+    // 세션 JWT 가 아니면 대시보드 쿠키로 쓸 수 없음 (auth/me 204)
+    if (payload.type && payload.type !== 'session') {
+      throw new Error(t('cursor.loginNotSession'));
+    }
+    const cookie = cookieStorageValue(accessToken) || cursorAuth.cookieFromAccessToken(accessToken);
     if (!cookie) throw new Error(t('cursor.loginNoToken'));
     await site.setCookie('cursor', { url: ORIGIN, name: COOKIE, value: cookie });
-    // 쿠키로 API 가 되는지 바로 확인 (숨김 창 로드 없음)
     const check = await fetchWithCookie(cookie, t('cursor.src'));
     if (!check.ok) {
-      throw new Error(check.skipped || check.error || t('cursor.loginNoToken'));
+      const why = check.skipped || check.error || '';
+      if (/auth\/me\s*204/i.test(why)) throw new Error(t('cursor.loginAuthMe204'));
+      throw new Error(why || t('cursor.loginNoToken'));
     }
     finished = true;
     site.closeLogin('cursor');

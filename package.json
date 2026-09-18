@@ -1,7 +1,7 @@
 {
   "name": "ai-usage-dashboard",
   "productName": "AI Usage Dashboard",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Claude / ChatGPT / Cursor / Gemini / Perplexity / Grok 및 Copilot·영상 AI 등 사용량을 한 화면에서 보여주는 데스크톱 앱",
   "main": "src/main.js",
   "author": "poohc",

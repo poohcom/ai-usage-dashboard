@@ -247,10 +247,16 @@ const PAGE_HELPERS = `
 `;
 
 /**
- * 로그인 창. cookieName 이 세션에 생기면 자동으로 닫고 onClosed 호출.
- * quietDeepLink: cursor:// 차단 시 알림 생략 (PKCE poll 로그인은 승인 직후 딥링크가 흔함)
+ * 로그인 창. cookieName(들) 이 세션에 생기면 자동으로 닫고 onClosed 호출.
+ * quietDeepLink: cursor:// 차단 시 알림 생략
+ * cookieNames: 여러 이름 중 하나라도 있으면 성공
  */
-function openLogin(id, url, onClosed, name, { cookieName = null, cookieUrl = null, quietDeepLink = false } = {}) {
+function openLogin(id, url, onClosed, name, {
+  cookieName = null,
+  cookieNames = null,
+  cookieUrl = null,
+  quietDeepLink = false,
+} = {}) {
   let w = loginWindows.get(id);
   if (w && !w.isDestroyed()) { w.focus(); return w; }
   const ses = getSession(id);
@@ -262,6 +268,8 @@ function openLogin(id, url, onClosed, name, { cookieName = null, cookieUrl = nul
   loginWindows.set(id, w);
   guardAuthWindow(w, id, { quietDeepLink });
 
+  const names = cookieNames || (cookieName ? [cookieName] : []);
+
   let settled = false;
   const finish = () => {
     if (settled) return;
@@ -272,11 +280,17 @@ function openLogin(id, url, onClosed, name, { cookieName = null, cookieUrl = nul
   };
 
   let poll = null;
-  if (cookieName && cookieUrl) {
+  if (names.length && cookieUrl) {
     poll = setInterval(async () => {
       try {
-        const list = await ses.cookies.get({ url: cookieUrl, name: cookieName });
-        if (list && list.length && list[0].value) {
+        const list = await ses.cookies.get({ url: cookieUrl });
+        const hit = (list || []).some((c) => {
+          if (!c || !c.value) return false;
+          if (names.includes(c.name)) return true;
+          if (/^sk-ant-/i.test(c.value) && /session/i.test(c.name || '')) return true;
+          return false;
+        });
+        if (hit) {
           if (!w.isDestroyed()) w.close();
           else finish();
         }
@@ -313,6 +327,39 @@ async function getCookie(id, { url, name }) {
   const ses = getSession(id);
   const list = await ses.cookies.get({ url, name });
   return list && list[0] ? list[0].value : null;
+}
+
+/** 해당 출처의 모든 쿠키 */
+async function listCookies(id, url) {
+  const ses = getSession(id);
+  return ses.cookies.get({ url });
+}
+
+/**
+ * 파티션 세션으로 fetch (로그인 창과 같은 쿠키 jar + Chromium 네트워크).
+ * Cloudflare 가 net.fetch 를 막는 경우에도 세션 쿠키가 있으면 통과하기 쉽다.
+ */
+async function requestInSession(id, url, { method = 'GET', headers = {}, body, timeoutMs = 45000 } = {}) {
+  const ses = getSession(id);
+  if (typeof ses.fetch !== 'function') {
+    throw new Error('session.fetch is not available in this Electron version');
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await ses.fetch(url, {
+      method,
+      headers,
+      body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* not json */ }
+    return { status: res.status, ok: res.ok, json, text: json ? undefined : text.slice(0, 2000) };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function clearSession(id) {
@@ -375,5 +422,5 @@ function destroyAll() {
 
 module.exports = {
   runInSite, openLogin, openLoginWait, closeLogin, clearSession, destroyAll, PAGE_HELPERS,
-  setCookie, getCookie, getSession, destroyHidden,
+  setCookie, getCookie, listCookies, requestInSession, getSession, destroyHidden,
 };

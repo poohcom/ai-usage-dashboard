@@ -156,7 +156,10 @@ ipcMain.handle('login:open', async (_e, id) => {
   }
   if (!p.loginUrl) return false;
   const opts = {};
-  if (p.loginCookieName && p.loginCookieUrl) {
+  if (p.loginCookieNames && p.loginCookieUrl) {
+    opts.cookieNames = p.loginCookieNames;
+    opts.cookieUrl = p.loginCookieUrl;
+  } else if (p.loginCookieName && p.loginCookieUrl) {
     opts.cookieName = p.loginCookieName;
     opts.cookieUrl = p.loginCookieUrl;
   }
