@@ -129,8 +129,8 @@ function splitCookieParts(raw) {
 
 /**
  * WorkosCursorSessionToken 후보들.
- * auth/me 는 sub::jwt 만 받고, bare JWT 는 204 를 낸다.
- * full sub(github|user_…) / user_… 둘 다 시도.
+ * auth/me 는 sub::jwt 형태. bare JWT / 잘못된 id 는 204.
+ * %3A%3A 인코딩·원문 :: · full sub / user_… 모두 시도.
  */
 function cookieHeaderVariants(raw) {
   const { jwt, ids } = splitCookieParts(raw);
@@ -139,11 +139,19 @@ function cookieHeaderVariants(raw) {
   const add = (v) => { if (v && !out.includes(v)) out.push(v); };
   for (const id of ids) {
     add(`${id}%3A%3A${jwt}`);
-    // | 등 특수문자 인코딩 변형
-    if (/[^A-Za-z0-9_.-]/.test(id)) add(`${encodeURIComponent(id)}%3A%3A${jwt}`);
+    add(`${id}::${jwt}`);
+    if (/[^A-Za-z0-9_.-]/.test(id)) {
+      add(`${encodeURIComponent(id)}%3A%3A${jwt}`);
+      add(`${encodeURIComponent(id)}::${jwt}`);
+    }
   }
-  // 이미 올바른 형태면 그대로도 시도
-  if (/%3A%3A/i.test(raw) || raw.includes('::')) add(cookieHeaderValue(raw));
+  if (/%3A%3A/i.test(raw) || raw.includes('::')) {
+    add(cookieHeaderValue(raw));
+    // jar 에 인코딩돼 저장된 값을 디코드해 원문도 시도
+    try {
+      if (/%3A%3A/i.test(raw)) add(decodeURIComponent(raw));
+    } catch { /* */ }
+  }
   return out;
 }
 
@@ -151,8 +159,8 @@ function cookieHeaderValue(raw) {
   if (!raw) return null;
   if (raw.includes('%3A%3A') || raw.includes('%3a%3a')) return raw;
   if (raw.includes('::')) {
-    const [sub, ...rest] = raw.split('::');
-    return `${sub}%3A%3A${rest.join('::')}`;
+    const i = raw.indexOf('::');
+    return `${raw.slice(0, i)}%3A%3A${raw.slice(i + 2)}`;
   }
   const payload = creds.decodeJwt(raw);
   if (payload && payload.sub) {
@@ -169,11 +177,23 @@ function cookieStorageValue(accessToken) {
   return `${uid}::${accessToken}`;
 }
 
+function isUsableSessionJwt(payload) {
+  if (!payload || !payload.sub) return false;
+  // type 이 있으면 session 이어야 웹 쿠키로 쓸 수 있음. 없으면 aud 로 완화.
+  if (payload.type && payload.type !== 'session') return false;
+  if (payload.aud) {
+    const aud = Array.isArray(payload.aud) ? payload.aud.join(' ') : String(payload.aud);
+    if (aud && !/cursor\.com/i.test(aud)) return false;
+  }
+  return true;
+}
+
 async function fetchWithCookie(rawCookie, source) {
   const variants = cookieHeaderVariants(rawCookie);
   if (!variants.length) return { skipped: 'no cookie' };
   const baseHeaders = {
     Origin: ORIGIN,
+    Referer: `${ORIGIN}/dashboard`,
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     Accept: 'application/json',
   };
@@ -232,6 +252,70 @@ async function fetchWithCookie(rawCookie, source) {
     return result;
   }
   return { skipped: lastSkip || 'auth/me failed' };
+}
+
+/** partition 쿠키 jar + session.fetch (수동 Cookie 헤더보다 브라우저와 동일) */
+async function fetchWithSessionJar(source) {
+  const raw = await site.getCookie('cursor', { url: ORIGIN, name: COOKIE });
+  if (!raw) return { skipped: t('p.needsLogin', { site: 'cursor.com' }) };
+  // jar 값이 인코딩/비인코딩 어느 쪽이든 후보를 다시 심어 본다
+  const variants = cookieHeaderVariants(raw);
+  for (const v of variants.slice(0, 4)) {
+    const store = /%3A%3A/i.test(v) ? (() => { try { return decodeURIComponent(v); } catch { return v; } })() : v;
+    try {
+      await site.setCookie('cursor', { url: ORIGIN, name: COOKIE, value: store });
+    } catch { /* */ }
+    try {
+      const me = await site.requestInSession('cursor', `${ORIGIN}/api/auth/me`, {
+        headers: {
+          Accept: 'application/json',
+          Origin: ORIGIN,
+          Referer: `${ORIGIN}/dashboard`,
+        },
+        timeoutMs: 30000,
+      });
+      if (me.status === 204 || me.status === 404 || me.status === 401 || me.status === 403) continue;
+      const summary = await site.requestInSession('cursor', `${ORIGIN}/api/usage-summary`, {
+        headers: {
+          Accept: 'application/json',
+          Origin: ORIGIN,
+          Referer: `${ORIGIN}/dashboard`,
+        },
+        timeoutMs: 30000,
+      });
+      if (summary.status === 401 || summary.status === 403) continue;
+      if (!summary.json && !(me.json && me.status === 200)) continue;
+      let sand = null, agg = null;
+      let start = Date.now() - 30 * 86400000, end = Date.now();
+      if (summary.json) {
+        const s = Date.parse(summary.json.billingCycleStart), e = Date.parse(summary.json.billingCycleEnd);
+        if (s) start = s; if (e) end = e;
+      }
+      const userId = me.json && (me.json.id != null ? me.json.id : null);
+      try {
+        const r = await site.requestInSession('cursor', `${ORIGIN}/api/dashboard/get-sand-usage-status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: ORIGIN, Referer: `${ORIGIN}/dashboard` },
+          body: '{}',
+        });
+        if (r.ok) sand = r.json;
+      } catch { /* */ }
+      try {
+        const body = { teamId: 0, startDate: String(start), endDate: String(end) };
+        if (userId != null) body.userId = userId;
+        const r = await site.requestInSession('cursor', `${ORIGIN}/api/dashboard/get-aggregated-usage-events`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: ORIGIN, Referer: `${ORIGIN}/dashboard` },
+          body,
+        });
+        if (r.ok) agg = r.json;
+      } catch { /* */ }
+      const result = assemble(me.json || {}, summary.json, sand, agg, source);
+      if (result) return result;
+    } catch { /* 다음 변형 */ }
+  }
+  // session.fetch 실패 시 기존 수동 Cookie 경로
+  return fetchWithCookie(raw, source);
 }
 
 async function viaIdeToken() {
