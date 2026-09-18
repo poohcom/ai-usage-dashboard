@@ -38,13 +38,14 @@ npm run dist:mac   # macOS: dist/ 아래 dmg + zip (macOS 에서 실행해야 �
 |---|---|---|
 | Claude | ① Claude Code 로그인 자격증명 자동 인식 (`~/.claude/.credentials.json`, macOS 는 Keychain) ② 없으면 앱 안에서 claude.ai 로그인 | 5시간 세션, 주간(전체 모델), 모델별 주간(예: Fable) 사용률과 리셋 시각, 용도별(Claude Code/채팅/Cowork) 주간 비중, 추가 사용량 |
 | ChatGPT / Codex | ① Codex CLI 자격증명 자동 인식 (`~/.codex/auth.json`) ② 없으면 앱 안에서 chatgpt.com 로그인 | ChatGPT 플랜의 Codex 5시간/주간 한도, 리셋 시각, 플랜 |
-| Cursor | 앱 안에서 cursor.com 로그인 | Auto 모델 / 지정 모델 API / 전체 포함분 사용률, 온디맨드, Grok Bot 주간 한도, 결제 주기 종료(리셋) 시각, 이번 주기 모델별 비용·토큰 비중 |
-| Gemini / Antigravity | ① 카드의 [Google 로그인] (브라우저에서 Google 계정 로그인, Antigravity 공개 OAuth 클라이언트 사용) ② agy CLI / Antigravity 가 저장한 토큰 자동 인식 ③ Gemini CLI 토큰(구형, 서버가 거부할 수 있음) | 모델 그룹별(Gemini 모델 / Claude·GPT 모델) 주간·5시간 남은 비율과 리셋 시각, 티어 |
+| Cursor | ① Cursor IDE 로그인 자동 인식 ② 없으면 앱 안에서 cursor.com 로그인 (딥링크 차단) | Auto 모델 / 지정 모델 API / 전체 포함분 사용률, 온디맨드, Grok Bot 주간 한도, 결제 주기 종료(리셋) 시각, 이번 주기 모델별 비용·토큰 비중 |
+| Gemini / Antigravity | ① 카드의 [Google 로그인] (`127.0.0.1:51121` 콜백) ② agy CLI / Antigravity 토큰 자동 인식 ③ Gemini CLI 토큰(구형, 서버가 거부할 수 있음) | 모델 그룹별(Gemini 모델 / Claude·GPT 모델) 주간·5시간 남은 비율과 리셋 시각, 티어 |
 | Perplexity | 앱 안에서 perplexity.ai 로그인 | 무료 검색 / Pro / Research / Labs 남은 횟수, 모델별 한도(응답에 있을 때), 크레딧 |
 | Grok | 앱 안에서 grok.com 로그인 | 모델·요청 종류별 남은 쿼리 수 / 창 크기 |
 
 - **로그인 방식**: 카드의 [로그인] 버튼을 누르면 해당 서비스 전용 브라우저 창이 열립니다. 평소처럼 로그인하고 창을 닫으면 세션이 저장되어 이후 자동으로 조회합니다. [세션 지우기] 로 저장된 쿠키/토큰을 삭제할 수 있습니다.
-- **Gemini / Antigravity**: Gemini CLI 의 개인용 로그인은 Google 이 중단했습니다("This client is no longer supported ... migrate to Antigravity"). 이 앱은 Antigravity 의 설치형 앱용 OAuth 클라이언트로 Google 로그인해 같은 Code Assist 쿼터 API(`retrieveUserQuotaSummary`)를 호출합니다. 클라이언트 id/secret 은 **소스에 들어 있지 않고**, 이 PC 에 설치된 `agy` CLI 또는 Antigravity IDE 실행파일에서 런타임에 추출합니다(둘 다 없으면 `ANTIGRAVITY_OAUTH_CLIENT_ID` / `ANTIGRAVITY_OAUTH_CLIENT_SECRET` 환경변수로 지정). 토큰은 OS 암호화(safeStorage)로 앱 데이터 폴더에 저장됩니다.
+- **Gemini / Antigravity**: Gemini CLI 의 개인용 로그인은 Google 이 중단했습니다("This client is no longer supported ... migrate to Antigravity"). 이 앱은 Antigravity 의 설치형 앱용 OAuth 클라이언트로 Google 로그인해 같은 Code Assist 쿼터 API를 호출합니다. 클라이언트 id/secret 은 **소스에 들어 있지 않고**, 이 PC 에 설치된 `agy` CLI 또는 Antigravity IDE 실행파일에서 런타임에 추출합니다(둘 다 없으면 `ANTIGRAVITY_OAUTH_CLIENT_ID` / `ANTIGRAVITY_OAUTH_CLIENT_SECRET` 환경변수로 지정). 콜백은 Antigravity 와 동일한 `http://127.0.0.1:51121/oauth-callback` 입니다. 요약 API 가 막혀도 모델별 쿼터(`fetchAvailableModels`)로 폴백합니다. 토큰은 OS 암호화(safeStorage)로 앱 데이터 폴더에 저장됩니다.
+- **Cursor**: Cursor IDE 에 이미 로그인돼 있으면 `state.vscdb` 세션을 자동 인식합니다. 앱 안 [로그인]은 **이 창에서** 웹 로그인을 완료해야 하며, `cursor://` 딥링크로 Cursor 데스크톱이 뜨면 세션이 이 앱에 남지 않습니다(딥링크는 차단됩니다).
 - **CLI 자격증명**: Claude Code / Codex 토큰이 만료된 경우 앱은 토큰을 갱신하지 않습니다(CLI 가 저장한 refresh token 을 무효화할 수 있기 때문). 터미널에서 `claude`, `codex` 를 한 번 실행하면 CLI 가 갱신하고 앱이 다시 인식합니다. Google 토큰은 refresh token 이 회전하지 않아 앱 메모리/앱 저장소에서만 갱신합니다.
 - **ChatGPT 대화 메시지 한도** 는 조회 API 가 없어, ChatGPT 플랜에 포함된 Codex 한도(5시간/주간)를 표시합니다.
 

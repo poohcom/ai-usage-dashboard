@@ -1,9 +1,10 @@
 'use strict';
-// Cursor: 앱 내 cursor.com 로그인 세션 →
+// Cursor: ① Cursor IDE 로컬 세션 토큰(state.vscdb) ② 앱 내 cursor.com 웹 로그인 세션
 //   /api/usage-summary                          플랜 포함분(Auto 모델 / 지정 모델 API / 전체), 온디맨드, 결제 주기
 //   /api/dashboard/get-sand-usage-status        Grok Bot 주간 한도
 //   /api/dashboard/get-aggregated-usage-events  모델별 사용량(토큰/비용) 집계
-const { toMs, clampPct } = require('../lib/http');
+const creds = require('../lib/creds');
+const { request, toMs, clampPct } = require('../lib/http');
 const site = require('../lib/siteSession');
 const { t } = require('../lib/i18n');
 
@@ -76,6 +77,109 @@ function parseAggregated(json) {
     }));
 }
 
+function assemble(me, summary, sand, agg, source) {
+  let windows = [], extra = [];
+  if (summary) ({ windows, extra } = parseSummary(summary));
+  const sandWin = sand ? parseSand(sand) : null;
+  if (sandWin) windows.push(sandWin);
+  const models = agg ? parseAggregated(agg) : [];
+  if (models.length) {
+    windows.push({ key: 'sep', kind: 'section', label: t('cursor.models'), usedPct: null, resetAt: null });
+    windows.push(...models);
+    const total = num(agg.totalCostCents);
+    if (total != null) extra.push({ label: t('cursor.cycleCost'), value: usd(total) });
+  }
+  if (!windows.length) return null;
+  return {
+    ok: true,
+    source,
+    account: me && me.email ? me.email : null,
+    plan: summary && summary.membershipType ? String(summary.membershipType).toUpperCase() : null,
+    windows, extra,
+    raw: { summary, sand, aggregated: agg },
+  };
+}
+
+/** Cursor IDE / 환경변수 세션 토큰으로 직접 API 호출 */
+async function viaIdeToken() {
+  const tok = creds.cursorIdeToken();
+  if (!tok) return { skipped: t('p.noCreds', { cli: 'Cursor IDE' }) };
+  const cookie = `WorkosCursorSessionToken=${tok.sub}%3A%3A${tok.jwt}`;
+  const headers = {
+    Cookie: cookie,
+    Origin: ORIGIN,
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    Accept: 'application/json',
+  };
+  const me = await request(`${ORIGIN}/api/auth/me`, { headers });
+  if (me.status === 401 || me.status === 403 || !me.json) {
+    return { skipped: `IDE token auth/me ${me.status}` };
+  }
+  const summary = await request(`${ORIGIN}/api/usage-summary`, { headers });
+  if (summary.status === 401 || summary.status === 403) {
+    return { skipped: `IDE token usage-summary ${summary.status}` };
+  }
+  let start = Date.now() - 30 * 86400000, end = Date.now();
+  if (summary.json) {
+    const s = Date.parse(summary.json.billingCycleStart), e = Date.parse(summary.json.billingCycleEnd);
+    if (s) start = s; if (e) end = e;
+  }
+  const postHeaders = { ...headers, 'Content-Type': 'application/json' };
+  let sand = null, agg = null;
+  try {
+    const r = await request(`${ORIGIN}/api/dashboard/get-sand-usage-status`, { method: 'POST', headers: postHeaders, body: '{}' });
+    if (r.ok) sand = r.json;
+  } catch { /* 선택 */ }
+  try {
+    const r = await request(`${ORIGIN}/api/dashboard/get-aggregated-usage-events`, {
+      method: 'POST', headers: postHeaders,
+      body: JSON.stringify({ teamId: 0, startDate: String(start), endDate: String(end) }),
+    });
+    if (r.ok) agg = r.json;
+  } catch { /* 선택 */ }
+  // 웹 세션 창에서도 같은 쿠키를 쓸 수 있게 심어 둔다 (로그인 버튼 없이 유지)
+  try {
+    await site.setCookie('cursor', {
+      url: ORIGIN,
+      name: 'WorkosCursorSessionToken',
+      value: tok.cookie,
+    });
+  } catch { /* 무시 */ }
+  const result = assemble(me.json, summary.json, sand, agg, t(tok.sourceKey || 'cursor.srcIde'));
+  if (!result) return { skipped: t('p.noWindows') };
+  return result;
+}
+
+async function viaWeb() {
+  const script = `${site.PAGE_HELPERS}
+    (async () => {
+      const me = await __req('/api/auth/me');
+      if (me.status === 401 || me.status === 403 || !me.json) return { needsLogin: true, status: me.status };
+      const summary = await __req('/api/usage-summary');
+      if (summary.status === 401 || summary.status === 403) return { needsLogin: true, status: summary.status };
+      const post = (u, body) => __req(u, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: '${ORIGIN}' }, body: JSON.stringify(body || {}) });
+      let start = Date.now() - 30 * 86400000, end = Date.now();
+      if (summary.json) { const s = Date.parse(summary.json.billingCycleStart), e = Date.parse(summary.json.billingCycleEnd); if (s) start = s; if (e) end = e; }
+      let sand = null, agg = null;
+      try { sand = await post('/api/dashboard/get-sand-usage-status', {}); } catch {}
+      try { agg = await post('/api/dashboard/get-aggregated-usage-events', { teamId: 0, startDate: String(start), endDate: String(end) }); } catch {}
+      return { ok: true, me: me.json, summary, sand, agg };
+    })()`;
+  const r = await site.runInSite('cursor', ORIGIN, script);
+  if (r.needsLogin) return { ok: false, needsLogin: true, error: t('p.needsLogin', { site: 'cursor.com' }) };
+  const result = assemble(
+    r.me,
+    r.summary && r.summary.json,
+    r.sand && r.sand.ok ? r.sand.json : null,
+    r.agg && r.agg.ok ? r.agg.json : null,
+    t('cursor.src'),
+  );
+  if (!result) {
+    return { ok: false, error: t('p.parseFailStatus', { info: `usage-summary ${r.summary && r.summary.status}` }), raw: { summary: r.summary && (r.summary.json || r.summary.text) } };
+  }
+  return result;
+}
+
 module.exports = {
   id: 'cursor',
   nameKey: 'cursor.name',
@@ -83,43 +187,14 @@ module.exports = {
   loginUrl: 'https://cursor.com/dashboard',
   hintKey: 'cursor.hint',
   async fetch() {
-    const script = `${site.PAGE_HELPERS}
-      (async () => {
-        const me = await __req('/api/auth/me');
-        if (me.status === 401 || me.status === 403 || !me.json) return { needsLogin: true, status: me.status };
-        const summary = await __req('/api/usage-summary');
-        if (summary.status === 401 || summary.status === 403) return { needsLogin: true, status: summary.status };
-        const post = (u, body) => __req(u, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: '${ORIGIN}' }, body: JSON.stringify(body || {}) });
-        let start = Date.now() - 30 * 86400000, end = Date.now();
-        if (summary.json) { const s = Date.parse(summary.json.billingCycleStart), e = Date.parse(summary.json.billingCycleEnd); if (s) start = s; if (e) end = e; }
-        let sand = null, agg = null;
-        try { sand = await post('/api/dashboard/get-sand-usage-status', {}); } catch {}
-        try { agg = await post('/api/dashboard/get-aggregated-usage-events', { teamId: 0, startDate: String(start), endDate: String(end) }); } catch {}
-        return { ok: true, me: me.json, summary, sand, agg };
-      })()`;
-    const r = await site.runInSite('cursor', ORIGIN, script);
-    if (r.needsLogin) return { ok: false, needsLogin: true, error: t('p.needsLogin', { site: 'cursor.com' }) };
-    let windows = [], extra = [];
-    if (r.summary && r.summary.ok) ({ windows, extra } = parseSummary(r.summary.json));
-    const sand = r.sand && r.sand.ok ? parseSand(r.sand.json) : null;
-    if (sand) windows.push(sand);
-    const models = r.agg && r.agg.ok ? parseAggregated(r.agg.json) : [];
-    if (models.length) {
-      windows.push({ key: 'sep', kind: 'section', label: t('cursor.models'), usedPct: null, resetAt: null });
-      windows.push(...models);
-      const total = num(r.agg.json.totalCostCents);
-      if (total != null) extra.push({ label: t('cursor.cycleCost'), value: usd(total) });
-    }
-    if (!windows.length) {
-      return { ok: false, error: t('p.parseFailStatus', { info: `usage-summary ${r.summary && r.summary.status}` }), raw: { summary: r.summary && (r.summary.json || r.summary.text) } };
-    }
-    return {
-      ok: true,
-      source: t('cursor.src'),
-      account: r.me && r.me.email ? r.me.email : null,
-      plan: r.summary && r.summary.json && r.summary.json.membershipType ? String(r.summary.json.membershipType).toUpperCase() : null,
-      windows, extra,
-      raw: { summary: r.summary && r.summary.json, sand: r.sand && r.sand.json, aggregated: r.agg && r.agg.json },
-    };
+    const notes = [];
+    try {
+      const ide = await viaIdeToken();
+      if (ide.ok) return ide;
+      if (ide.skipped) notes.push(ide.skipped);
+    } catch (e) { notes.push(`IDE: ${e.message}`); }
+    const w = await viaWeb();
+    if (!w.ok && notes.length) w.error = `${w.error || t('p.needsLogin', { site: 'cursor.com' })} (${notes.join('; ')})`;
+    return w;
   },
 };

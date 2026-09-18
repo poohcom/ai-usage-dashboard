@@ -129,7 +129,7 @@ function scanBinary(file, patterns) {
 /**
  * Antigravity 의 공개 OAuth 클라이언트(설치형 앱용) 후보. 소스에 값을 넣지 않고
  * env → 로컬에 설치된 agy / Antigravity IDE 실행파일에서 런타임 추출.
- * 반환: { ids: [...], secrets: [...] } (짝은 호출자가 확인)
+ * 반환: { ids: [...], secrets: [...], paired? }
  */
 function antigravityOauthCandidates() {
   if (process.env.ANTIGRAVITY_OAUTH_CLIENT_ID && process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET) {
@@ -145,6 +145,85 @@ function antigravityOauthCandidates() {
     } catch { /* 다음 후보 */ }
   }
   return { ids: [...ids], secrets: [...secrets], paired: false };
+}
+
+/** VS Code/Cursor state.vscdb 바이너리에서 key 근처 JWT 를 찾는다 (sqlite 의존성 없이) */
+function scanVscdbJwt(file, keyHint) {
+  try {
+    const data = fs.readFileSync(file);
+    const keyBuf = Buffer.from(keyHint, 'utf8');
+    let pos = 0;
+    while ((pos = data.indexOf(keyBuf, pos)) !== -1) {
+      const slice = data.slice(pos, Math.min(data.length, pos + 8000)).toString('utf8');
+      const m = slice.match(/eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/);
+      if (m) return m[0];
+      pos += keyBuf.length;
+    }
+    // 키 근처 실패 시 파일 전체에서 session 타입 JWT 후보를 느슨하게 탐색
+    const text = data.toString('latin1');
+    const re = /eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g;
+    let match;
+    while ((match = re.exec(text))) {
+      const payload = decodeJwt(match[0]);
+      if (payload && (payload.type === 'session' || payload.aud === 'https://cursor.com')) return match[0];
+    }
+  } catch { /* 없음 */ }
+  return null;
+}
+
+function cursorStateDbPaths() {
+  const appData = process.env.APPDATA || path.join(home(), 'AppData', 'Roaming');
+  const paths = [];
+  if (process.platform === 'win32') {
+    paths.push(path.join(appData, 'Cursor', 'User', 'globalStorage', 'state.vscdb'));
+  } else if (process.platform === 'darwin') {
+    paths.push(path.join(home(), 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb'));
+  } else {
+    paths.push(path.join(home(), '.config', 'Cursor', 'User', 'globalStorage', 'state.vscdb'));
+  }
+  return paths;
+}
+
+/**
+ * Cursor IDE 가 저장한 세션 JWT (state.vscdb 의 cursorAuth/accessToken).
+ * 웹 쿠키 WorkosCursorSessionToken = `${sub}::${jwt}` 형태로 쓴다.
+ */
+function cursorIdeToken() {
+  if (process.env.CURSOR_SESSION_TOKEN) {
+    const raw = process.env.CURSOR_SESSION_TOKEN.trim();
+    if (raw.includes('::') || raw.includes('%3A%3A')) {
+      const cookie = raw.includes('%3A%3A') ? decodeURIComponent(raw) : raw;
+      const jwt = cookie.split('::').pop();
+      const payload = decodeJwt(jwt);
+      return { jwt, sub: (payload && payload.sub) || cookie.split('::')[0], cookie, sourceKey: 'cursor.srcEnv' };
+    }
+    const payload = decodeJwt(raw);
+    if (payload && payload.sub) {
+      return { jwt: raw, sub: payload.sub, cookie: `${payload.sub}::${raw}`, sourceKey: 'cursor.srcEnv' };
+    }
+  }
+  const keyHints = ['cursorAuth/accessToken', 'cursorAuth/cachedAccessToken', 'WorkosCursorSessionToken'];
+  for (const db of cursorStateDbPaths()) {
+    for (const hint of keyHints) {
+      const jwt = scanVscdbJwt(db, hint);
+      if (!jwt) continue;
+      const payload = decodeJwt(jwt);
+      if (!payload || !payload.sub) continue;
+      return { jwt, sub: payload.sub, cookie: `${payload.sub}::${jwt}`, sourceKey: 'cursor.srcIde' };
+    }
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const jwt = execFileSync('security', ['find-generic-password', '-s', 'cursor-access-token', '-w'], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000,
+      }).trim();
+      const payload = decodeJwt(jwt);
+      if (jwt && payload && payload.sub) {
+        return { jwt, sub: payload.sub, cookie: `${payload.sub}::${jwt}`, sourceKey: 'cursor.srcKeychain' };
+      }
+    } catch { /* 없음 */ }
+  }
+  return null;
 }
 
 function normalizeGoogleTokens(j) {
@@ -236,4 +315,5 @@ function decodeJwt(token) {
 module.exports = {
   claudeCode, codex, geminiCli, geminiProjectHint, geminiOauthClient, decodeJwt,
   antigravity, antigravityOauthCandidates, normalizeGoogleTokens,
+  cursorIdeToken,
 };

@@ -15,16 +15,23 @@ const STORE = 'gemini-antigravity';
 const memRefreshed = new Map(); // source -> {access_token, expiry}
 let clientCache = null;
 
-function platformEnum() {
-  const arch = process.arch === 'arm64' ? 'ARM64' : 'AMD64';
-  if (process.platform === 'win32') return `WINDOWS_${arch}`;
-  if (process.platform === 'darwin') return `DARWIN_${arch}`;
-  return `LINUX_${arch}`;
+// Cloud Code 백엔드는 OS별 enum(WINDOWS_AMD64 등)을 거부하는 경우가 있어 PLATFORM_UNSPECIFIED 사용
+const METADATA = { ideType: 'ANTIGRAVITY', pluginType: 'GEMINI', platform: 'PLATFORM_UNSPECIFIED' };
+
+function antigravityUserAgent() {
+  if (process.platform === 'win32') return 'antigravity/1.18.3 windows/amd64';
+  if (process.platform === 'darwin') return process.arch === 'arm64' ? 'antigravity/1.18.3 darwin/arm64' : 'antigravity/1.18.3 darwin/amd64';
+  return 'antigravity/1.18.3 linux/amd64';
 }
-const METADATA = { ideType: 'ANTIGRAVITY', pluginType: 'GEMINI', platform: platformEnum() };
 
 function headers(token) {
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': 'antigravity/1.0' };
+  return {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+    'User-Agent': antigravityUserAgent(),
+    'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
+    'Client-Metadata': JSON.stringify(METADATA),
+  };
 }
 
 /** id/secret 짝 확인: 가짜 refresh_token 으로 토큰 endpoint 를 찔러 invalid_client(짝 아님) 와 invalid_grant(짝) 를 구분 */
@@ -91,9 +98,23 @@ async function freshToken(src) {
   throw lastErr || new Error(t('gemini.refreshFail'));
 }
 
+function projectId(v) {
+  if (!v) return null;
+  if (typeof v === 'string') {
+    const s = v.trim();
+    return s || null;
+  }
+  if (typeof v === 'object') {
+    const id = v.id || v.projectId || v.name;
+    if (typeof id === 'string' && id.trim()) return id.trim();
+  }
+  return null;
+}
+
 async function loadCodeAssist(token, projectHint) {
   const body = { metadata: METADATA };
-  if (projectHint) body.cloudaicompanionProject = projectHint;
+  const hint = projectId(projectHint);
+  if (hint) body.cloudaicompanionProject = hint;
   const res = await request(`${API}:loadCodeAssist`, { method: 'POST', headers: headers(token), body });
   if (!res.ok) {
     const msg = (res.json && res.json.error && res.json.error.message) || res.text || '';
@@ -109,14 +130,15 @@ async function onboard(token, load) {
   const tier = (load.allowedTiers || []).find((x) => x.isDefault) || (load.allowedTiers || [])[0];
   if (!tier) return null;
   const body = { tierId: tier.id, metadata: METADATA };
-  if (!tier.userDefinedCloudaicompanionProject && creds.geminiProjectHint()) body.cloudaicompanionProject = creds.geminiProjectHint();
+  const hint = projectId(creds.geminiProjectHint());
+  if (!tier.userDefinedCloudaicompanionProject && hint) body.cloudaicompanionProject = hint;
   for (let i = 0; i < 5; i++) {
     const res = await request(`${API}:onboardUser`, { method: 'POST', headers: headers(token), body });
     if (!res.ok) return null;
     const op = res.json || {};
     if (op.done) {
       const proj = op.response && op.response.cloudaicompanionProject;
-      return { project: proj ? (proj.id || proj) : null, tier: tier.name || tier.id };
+      return { project: projectId(proj), tier: tier.name || tier.id };
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
@@ -154,25 +176,56 @@ function bucketsFromQuota(json) {
   return [...byModel.values()];
 }
 
+function bucketsFromModels(json) {
+  const models = (json && json.models) || {};
+  const out = [];
+  for (const [id, info] of Object.entries(models)) {
+    if (!info || typeof info !== 'object') continue;
+    if (info.isInternal) continue;
+    const label = info.displayName || String(id).replace(/^models\//, '');
+    if (!label || /^(tab_|chat_)/i.test(id)) continue;
+    const q = info.quotaInfo || {};
+    const frac = typeof q.remainingFraction === 'number' ? q.remainingFraction
+      : (typeof info.remainingFraction === 'number' ? info.remainingFraction : null);
+    if (frac == null) continue;
+    out.push({
+      label,
+      remaining: frac,
+      resetAt: toMs(q.resetTime || info.resetTime),
+      note: null,
+    });
+  }
+  return out;
+}
+
 async function fetchWithSource(src) {
   const token = await freshToken(src);
   const load = await loadCodeAssist(token, creds.geminiProjectHint());
   const unsupported = (load.ineligibleTiers || []).find((x) => x.reasonCode === 'UNSUPPORTED_CLIENT');
   let tier = load.currentTier ? (load.currentTier.name || load.currentTier.id) : null;
-  let project = load.cloudaicompanionProject || null;
-  if (!tier && unsupported && !(load.allowedTiers || []).some((x) => x.id === 'free-tier')) {
+  let project = projectId(load.cloudaicompanionProject) || projectId(creds.geminiProjectHint());
+  if (!tier && unsupported && !(load.allowedTiers || []).some((x) => x.id === 'free-tier' || x.id === 'standard-tier')) {
     const err = new Error(unsupported.reasonMessage || t('gemini.unsupported'));
     err.unsupportedClient = true;
     throw err;
   }
-  if (!tier && !project) {
+  // currentTier 가 없어도 allowedTiers 가 있으면 온보딩 시도 (project 가 비어 있어도 모델 쿼터는 조회 가능)
+  if (!tier) {
     const ob = await onboard(token, load);
-    if (ob) { project = ob.project || project; tier = ob.tier || tier; }
+    if (ob) {
+      project = projectId(ob.project) || project;
+      tier = ob.tier || tier;
+    }
+    if (!tier) {
+      const allowed = (load.allowedTiers || []).find((x) => x.isDefault) || (load.allowedTiers || [])[0];
+      if (allowed) tier = allowed.name || allowed.id;
+    }
   }
   const h = headers(token);
-  const body = project ? { project } : {};
+  // API 는 project 를 문자열 스칼라로 요구한다 (객체를내면 400 Invalid value)
+  const body = project ? { project: String(project) } : {};
   const windows = [];
-  const raw = {};
+  const raw = { load, project };
   const summary = await request(`${API}:retrieveUserQuotaSummary`, { method: 'POST', headers: h, body });
   if (summary.ok) {
     raw.summary = summary.json;
@@ -183,14 +236,28 @@ async function fetchWithSource(src) {
   if (!windows.length) {
     const q = await request(`${API}:retrieveUserQuota`, { method: 'POST', headers: h, body });
     raw.quota = q.json || q.text;
-    if (!q.ok && !summary.ok) {
-      const msg = (q.json && q.json.error && q.json.error.message) || (summary.json && summary.json.error && summary.json.error.message) || '';
-      const err = new Error(t('gemini.quotaFail', { s1: summary.status, s2: q.status, msg }));
+    if (q.ok) {
+      for (const b of bucketsFromQuota(q.json)) {
+        windows.push({ key: b.label, label: b.label, usedPct: b.remaining == null ? null : clampPct((1 - b.remaining) * 100), resetAt: b.resetAt });
+      }
+    }
+  }
+  // 요약 API 가 라이선스(403 #3501) 등으로 막혀도 모델별 remainingFraction 은 내려오는 경우가 많음
+  if (!windows.length) {
+    const m = await request(`${API}:fetchAvailableModels`, { method: 'POST', headers: h, body });
+    raw.models = m.json || m.text;
+    if (m.ok) {
+      for (const b of bucketsFromModels(m.json)) {
+        windows.push({ key: b.label, label: b.label, usedPct: b.remaining == null ? null : clampPct((1 - b.remaining) * 100), resetAt: b.resetAt, note: b.note });
+      }
+    }
+    if (!windows.length) {
+      const msg = (summary.json && summary.json.error && summary.json.error.message)
+        || (m.json && m.json.error && m.json.error.message)
+        || '';
+      const err = new Error(t('gemini.quotaFail', { s1: summary.status, s2: m.status, msg }));
       err.raw = raw;
       throw err;
-    }
-    for (const b of bucketsFromQuota(q.json)) {
-      windows.push({ key: b.label, label: b.label, usedPct: b.remaining == null ? null : clampPct((1 - b.remaining) * 100), resetAt: b.resetAt });
     }
   }
   windows.sort((a, b) => (b.usedPct ?? -1) - (a.usedPct ?? -1));
@@ -215,13 +282,14 @@ module.exports = {
   hintKey: 'gemini.hint',
   loginLabelKey: 'gemini.loginLabel',
 
-  /** 브라우저 Google 로그인. 첫 클라이언트가 서버에서 거부되면 다음 클라이언트로 다시 시도 */
+  /** 브라우저 Google 로그인. Antigravity 고정 루프백(127.0.0.1:51121/oauth-callback) 사용 */
   async login() {
     const clients = await antigravityClients();
     if (!clients.length) throw new Error(t('gemini.noClient'));
     let lastErr = null;
     for (const client of clients) {
-      const tk = await oauth.login(client);
+      const tk = await oauth.loginAntigravity(client);
+      if (!tk.refresh_token) throw new Error(t('gemini.noRefresh'));
       oauth.saveTokens(STORE, { ...tk, clientId: client.id });
       try {
         await fetchWithSource({ name: t('gemini.srcOwn'), tokens: { ...tk, clientId: client.id }, clients: [client], own: true });
